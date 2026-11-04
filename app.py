@@ -15,10 +15,217 @@ import pdfplumber
 import requests
 from bs4 import BeautifulSoup
 import re
-from urllib.parse import urljoin, urlparse, quote
+from urllib.parse import urljoin, urlparse, quote, parse_qs
 import io
+import urllib.parse as up
 from typing import List, Dict, Optional
 import time
+
+# =============================================================================
+# HILFSFUNKTIONEN (MÜSSEN VOR DEM HAUPTCODE STEHEN!)
+# =============================================================================
+
+def search_for_homepage(query: str, method: str, serpapi_key: str = "") -> Optional[str]:
+    """Sucht im Web nach einer Homepage basierend auf dem Suchbegriff"""
+    try:
+        if "DuckDuckGo" in method:
+            return search_duckduckgo(query)
+        else:
+            return search_serpapi(query, serpapi_key)
+    except Exception:
+        return None
+
+def search_duckduckgo(query: str) -> Optional[str]:
+    """Nutzt DuckDuckGo HTML-Suche (einfach, kostenlos)"""
+    url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+
+    try:
+        response = requests.post(url, data={'q': query}, headers=headers, timeout=15)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'lxml')
+
+        results = soup.select('a.result__a')
+
+        if results:
+            first_link = results[0].get('href', '')
+
+            # DuckDuckGo leitet manchmal über uddg= Parameter weiter
+            if 'uddg=' in first_link:
+                parsed = up.parse_qs(up.urlparse(first_link).query)
+                if 'uddg' in parsed:
+                    first_link = parsed['uddg'][0]
+
+            # Verzeichnisse ausschließen
+            excluded_domains = ['local.ch', 'search.ch', 'yellow.local.ch', 'facebook.com',
+                                'linkedin.com', 'twitter.com', 'instagram.com', 'youtube.com',
+                                'wikipedia.org', 'doctorfmh.ch']
+
+            domain = urlparse(first_link).netloc.lower()
+            if domain and not any(excl in domain for excl in excluded_domains):
+                return first_link
+
+        return None
+    except Exception:
+        return None
+
+def search_serpapi(query: str, api_key: str) -> Optional[str]:
+    """Nutzt SerpApi Google Search"""
+    if not api_key:
+        return None
+
+    url = "https://serpapi.com/search"
+    params = {
+        'engine': 'google',
+        'q': query,
+        'api_key': api_key,
+        'num': 5
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
+
+        excluded_domains = ['local.ch', 'search.ch', 'facebook.com', 'linkedin.com',
+                            'wikipedia.org', 'doctorfmh.ch']
+
+        for res in data.get('organic_results', []):
+            link = res.get('link', '')
+            domain = urlparse(link).netloc.lower()
+            if domain and not any(excl in domain for excl in excluded_domains):
+                return link
+
+        return None
+    except Exception:
+        return None
+
+def extract_site_information(url: str, info_types: List[str]) -> Dict[str, Optional[str]]:
+    """Extrahiert verschiedene Informationen von einer Website"""
+    result = {}
+
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'lxml')
+
+        if 'Name' in info_types:
+            title_tag = soup.find('title')
+            h1_tag = soup.find('h1')
+            result['Name'] = title_tag.get_text().strip() if title_tag else (h1_tag.get_text().strip() if h1_tag else 'Nicht gefunden')
+
+        if 'Mailadresse' in info_types:
+            emails = extract_emails(response.text)
+            result['Mailadresse'] = '; '.join(emails[:3]) if emails else 'Keine gefunden'
+
+        if 'Telefon' in info_types:
+            phones = extract_phone_numbers(response.text)
+            result['Telefon'] = '; '.join(phones[:3]) if phones else 'Keine gefunden'
+
+        if 'Adresse' in info_types:
+            addresses = extract_addresses(soup, response.text)
+            result['Adresse'] = addresses[:2] if addresses else 'Keine gefunden'
+
+        if 'Über uns' in info_types:
+            about_text = extract_about_section(soup)
+            result['Über uns'] = about_text[:200] + '...' if about_text else 'Nicht gefunden'
+
+        if 'Dienstleistungen' in info_types:
+            services = extract_services(soup)
+            result['Dienstleistungen'] = '; '.join(services[:8]) if services else 'Keine gefunden'
+
+    except requests.exceptions.RequestException as e:
+        result['Error'] = f"HTTP Error: {str(e)}"
+
+    return result
+
+def extract_emails(text: str) -> List[str]:
+    """Sucht nach E-Mail Adressen im Text"""
+    pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    emails = re.findall(pattern, text)
+    return list(set(emails))
+
+def extract_phone_numbers(text: str) -> List[str]:
+    """Sucht nach Telefonnummern"""
+    pattern = r'(?:\+\d{2}|0)\s*\(?[0-9]{2,5}\)?[\s.\-/][0-9\s.\-]{6,}'
+    phones = re.findall(pattern, text)
+    cleaned = [p.strip() for p in phones if len(re.sub(r'\D', '', p)) >= 9]
+    return list(set(cleaned))[:5]
+
+def extract_addresses(soup: BeautifulSoup, text: str) -> List[str]:
+    """Versucht Adressen zu finden"""
+    addresses = []
+
+    contact_sections = soup.find_all(['footer', 'address']) + soup.find_all(class_=re.compile(r'(kontakt|adresse|contact|footer)', re.I))
+
+    for section in contact_sections[:3]:
+        addr_text = section.get_text(separator='\n', strip=True)[:150]
+        if addr_text and len(addr_text) > 20:
+            addresses.append(addr_text)
+
+    return addresses
+
+def extract_about_section(soup: BeautifulSoup) -> str:
+    """Sucht nach 'Über uns' Text"""
+    about_keywords = ['über uns', 'about us', 'unternehmen', 'firma', 'praxis', 'praxisportrait']
+
+    for tag in soup.find_all(['p', 'div']):
+        classes = ' '.join(tag.get('class', [])).lower()
+        if any(kw in classes for kw in about_keywords):
+            text = tag.get_text(strip=True)
+            if len(text) > 50:
+                return text
+
+    for p in soup.find_all('p'):
+        text = p.get_text(strip=True)
+        if len(text) > 100:
+            return text
+
+    return ''
+
+def extract_services(soup: BeautifulSoup) -> List[str]:
+    """Sucht nach Dienstleistungs-Listen"""
+    services = []
+
+    service_patterns = [
+        'service', 'angebot', 'dienstleistung', 'leistungen', 'behandlung',
+        'therapie', 'therapien', 'methoden', 'anwendung'
+    ]
+
+    for pattern in service_patterns:
+        lists = soup.find_all(['ul', 'ol'], class_=re.compile(pattern, re.I))
+        for lst in lists:
+            for li in lst.find_all('li')[:10]:
+                service_text = li.get_text(strip=True)
+                if 10 < len(service_text) < 100:
+                    services.append(service_text)
+
+    for container in soup.find_all(['section', 'div'], class_=re.compile(r'(leistungen|behandlung|angebote|services)', re.I)):
+        for li in container.find_all('li')[:10]:
+            service_text = li.get_text(strip=True)
+            if 10 < len(service_text) < 100 and service_text not in services:
+                services.append(service_text)
+
+    for heading in soup.find_all(['h2', 'h3']):
+        if any(keyword in heading.get_text().lower() for keyword in ['behandlung', 'leistung', 'angebot', 'therapie', 'methoden']):
+            sibling = heading.find_next(['ul', 'ol'])
+            if sibling:
+                for li in sibling.find_all('li')[:10]:
+                    service_text = li.get_text(strip=True)
+                    if 10 < len(service_text) < 100 and service_text not in services:
+                        services.append(service_text)
+
+    return services[:15]
+
+# =============================================================================
+# HAUPTANWENDUNG
+# =============================================================================
 
 # Seite konfigurieren
 st.set_page_config(
@@ -470,208 +677,6 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
             mime='text/csv',
             key="download_results"
         )
-
-# --- HILFSFUNKTIONEN ---
-def search_for_homepage(query: str, method: str, serpapi_key: str = "") -> Optional[str]:
-    """Sucht im Web nach einer Homepage basierend auf dem Suchbegriff"""
-    try:
-        if "DuckDuckGo" in method:
-            return search_duckduckgo(query)
-        else:
-            return search_serpapi(query, serpapi_key)
-    except Exception:
-        return None
-
-def search_duckduckgo(query: str) -> Optional[str]:
-    """Nutzt DuckDuckGo HTML-Suche (einfach, kostenlos)"""
-    url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-
-    try:
-        response = requests.post(url, data={'q': query}, headers=headers, timeout=15)
-        response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, 'lxml')
-
-        results = soup.select('a.result__a')
-
-        if results:
-            first_link = results[0].get('href', '')
-
-            # DuckDuckGo leitet manchmal über uddg= Parameter weiter
-            if 'uddg=' in first_link:
-                import urllib.parse as up
-                parsed = up.parse_qs(up.urlparse(first_link).query)
-                if 'uddg' in parsed:
-                    first_link = parsed['uddg'][0]
-
-            # Verzeichnisse/Vergleichsportale ausschließen (sind nicht die eigene Homepage)
-            excluded_domains = ['local.ch', 'search.ch', 'yellow.local.ch', 'facebook.com',
-                                'linkedin.com', 'twitter.com', 'instagram.com', 'youtube.com',
-                                'wikipedia.org', 'doctorfmh.ch', 'med待']
-
-            domain = urlparse(first_link).netloc.lower()
-            if domain and not any(excl in domain for excl in excluded_domains):
-                return first_link
-
-        return None
-    except Exception:
-        return None
-
-def search_serpapi(query: str, api_key: str) -> Optional[str]:
-    """Nutzt SerpApi Google Search"""
-    if not api_key:
-        return None
-
-    url = "https://serpapi.com/search"
-    params = {
-        'engine': 'google',
-        'q': query,
-        'api_key': api_key,
-        'num': 5
-    }
-
-    try:
-        response = requests.get(url, params=params, timeout=15)
-        data = response.json()
-
-        excluded_domains = ['local.ch', 'search.ch', 'facebook.com', 'linkedin.com',
-                            'wikipedia.org', 'doctorfmh.ch']
-
-        for res in data.get('organic_results', []):
-            link = res.get('link', '')
-            domain = urlparse(link).netloc.lower()
-            if domain and not any(excl in domain for excl in excluded_domains):
-                return link
-
-        return None
-    except Exception:
-        return None
-
-def extract_site_information(url: str, info_types: List[str]) -> Dict[str, Optional[str]]:
-    """Extrahiert verschiedene Informationen von einer Website"""
-    result = {}
-
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, 'lxml')
-
-        if 'Name' in info_types:
-            title_tag = soup.find('title')
-            h1_tag = soup.find('h1')
-            result['Name'] = title_tag.get_text().strip() if title_tag else (h1_tag.get_text().strip() if h1_tag else 'Nicht gefunden')
-
-        if 'Mailadresse' in info_types:
-            emails = extract_emails(response.text)
-            result['Mailadresse'] = '; '.join(emails[:3]) if emails else 'Keine gefunden'
-
-        if 'Telefon' in info_types:
-            phones = extract_phone_numbers(response.text)
-            result['Telefon'] = '; '.join(phones[:3]) if phones else 'Keine gefunden'
-
-        if 'Adresse' in info_types:
-            addresses = extract_addresses(soup, response.text)
-            result['Adresse'] = addresses[:2] if addresses else 'Keine gefunden'
-
-        if 'Über uns' in info_types:
-            about_text = extract_about_section(soup)
-            result['Über uns'] = about_text[:200] + '...' if about_text else 'Nicht gefunden'
-
-        if 'Dienstleistungen' in info_types:
-            services = extract_services(soup)
-            result['Dienstleistungen'] = '; '.join(services[:8]) if services else 'Keine gefunden'
-
-    except requests.exceptions.RequestException as e:
-        result['Error'] = f"HTTP Error: {str(e)}"
-
-    return result
-
-def extract_emails(text: str) -> List[str]:
-    """Sucht nach E-Mail Adressen im Text"""
-    pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-    emails = re.findall(pattern, text)
-    return list(set(emails))
-
-def extract_phone_numbers(text: str) -> List[str]:
-    """Sucht nach Telefonnummern"""
-    pattern = r'(?:\+\d{2}|0)\s*\(?[0-9]{2,5}\)?[\s.\-/][0-9\s.\-]{6,}'
-    phones = re.findall(pattern, text)
-    cleaned = [p.strip() for p in phones if len(re.sub(r'\D', '', p)) >= 9]
-    return list(set(cleaned))[:5]
-
-def extract_addresses(soup: BeautifulSoup, text: str) -> List[str]:
-    """Versucht Adressen zu finden"""
-    addresses = []
-
-    contact_sections = soup.find_all(['footer', 'address']) + soup.find_all(class_=re.compile(r'(kontakt|adresse|contact|footer)', re.I))
-
-    for section in contact_sections[:3]:
-        addr_text = section.get_text(separator='\n', strip=True)[:150]
-        if addr_text and len(addr_text) > 20:
-            addresses.append(addr_text)
-
-    return addresses
-
-def extract_about_section(soup: BeautifulSoup) -> str:
-    """Sucht nach 'Über uns' Text"""
-    about_keywords = ['über uns', 'about us', 'unternehmen', 'firma', 'praxis', 'praxisportrait']
-
-    for tag in soup.find_all(['p', 'div']):
-        classes = ' '.join(tag.get('class', [])).lower()
-        if any(kw in classes for kw in about_keywords):
-            text = tag.get_text(strip=True)
-            if len(text) > 50:
-                return text
-
-    for p in soup.find_all('p'):
-        text = p.get_text(strip=True)
-        if len(text) > 100:
-            return text
-
-    return ''
-
-def extract_services(soup: BeautifulSoup) -> List[str]:
-    """Sucht nach Dienstleistungs-Listen"""
-    services = []
-
-    service_patterns = [
-        'service', 'angebot', 'dienstleistung', 'leistungen', 'behandlung',
-        'therapie', 'therapien', 'methoden', 'anwendung'
-    ]
-
-    for pattern in service_patterns:
-        lists = soup.find_all(['ul', 'ol'], class_=re.compile(pattern, re.I))
-        for lst in lists:
-            for li in lst.find_all('li')[:10]:
-                service_text = li.get_text(strip=True)
-                if 10 < len(service_text) < 100:
-                    services.append(service_text)
-
-    # Auch Container mit passenden IDs/Klassen durchsuchen
-    for container in soup.find_all(['section', 'div'], class_=re.compile(r'(leistungen|behandlung|angebote|services)', re.I)):
-        for li in container.find_all('li')[:10]:
-            service_text = li.get_text(strip=True)
-            if 10 < len(service_text) < 100 and service_text not in services:
-                services.append(service_text)
-
-    # H2/H3-Überschriften wie "Unsere Behandlungen" folgen
-    for heading in soup.find_all(['h2', 'h3']):
-        if any(keyword in heading.get_text().lower() for keyword in ['behandlung', 'leistung', 'angebot', 'therapie', 'methoden']):
-            sibling = heading.find_next(['ul', 'ol'])
-            if sibling:
-                for li in sibling.find_all('li')[:10]:
-                    service_text = li.get_text(strip=True)
-                    if 10 < len(service_text) < 100 and service_text not in services:
-                        services.append(service_text)
-
-    return services[:15]
 
 # --- FOOTER ---
 st.markdown("---")
