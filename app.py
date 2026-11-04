@@ -15,7 +15,7 @@ import pdfplumber
 import requests
 from bs4 import BeautifulSoup
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, quote
 import io
 from typing import List, Dict, Optional
 import time
@@ -32,8 +32,8 @@ st.markdown("""
 Diese Web-Anwendung:
 1. Lädt eine PDF-Tabelle von einer URL herunter (alle Seiten werden zusammengeführt)
 2. Filtert und sortiert die Tabelle nach ausgewählten Spalten
-3. Sucht für jede sichtbare Zeile Informationen auf verlinkten Homepages
-4. Extrahiert Praxis-Namen, Mailadressen und weitere Details
+3. Sucht im Web nach Homepages (falls keine URL vorhanden ist)
+4. Extrahiert Praxis-Namen, Mailadressen, Telefon, Dienstleistungen und weitere Details
 5. Exportiert alle gesammelten Informationen als CSV
 """)
 
@@ -70,7 +70,6 @@ if st.button("PDF laden"):
             if all_tables:
                 st.success(f"{len(all_tables)} Tabelle(n) auf {all_tables[-1]['page']} Seite(n) gefunden.")
 
-                # ===== NEU: Tabellen zusammenführen =====
                 merge_mode = st.radio(
                     "Wie sollen die Tabellen verarbeitet werden?",
                     [
@@ -81,10 +80,8 @@ if st.button("PDF laden"):
                 )
 
                 if merge_mode.startswith("Alle Seiten"):
-                    # Erste Tabelle liefert die Spaltennamen (Kopfzeile)
                     header_row = all_tables[0]['data'][0]
 
-                    # Sicherstellen, dass keine leeren/doppelten Spaltennamen existieren
                     seen = {}
                     clean_header = []
                     for col in header_row:
@@ -102,15 +99,12 @@ if st.button("PDF laden"):
                     for t in all_tables:
                         for row in t['data']:
                             row_clean = [str(c).strip() if c is not None else "" for c in row]
-                            # Kopfzeilen-Wiederholungen überspringen (auf Folgeseiten)
                             if set(filter(None, row_clean)) and set(filter(None, row_clean)).issubset(header_strs):
                                 continue
-                            # Vollständig leere Zeilen überspringen
                             if not any(row_clean):
                                 continue
                             all_rows.append(row_clean)
 
-                    # Zeilen mit zu wenigen Werten auf leere Spalten auffüllen
                     n_cols = len(clean_header)
                     fixed_rows = []
                     for row in all_rows:
@@ -123,10 +117,8 @@ if st.button("PDF laden"):
                     df = pd.DataFrame(fixed_rows, columns=clean_header)
                     df = df.reset_index(drop=True)
 
-                    st.info(f"ℹ️ Zusammengeführt: {len(df)} Datenzeilen aus {len(all_tables)} Tabellensegmenten "
-                            f"(wiederholte Kopfzeilen und Leerzeilen wurden automatisch entfernt).")
+                    st.info(f"ℹ️ Zusammengeführt: {len(df)} Datenzeilen aus {len(all_tables)} Tabellensegmenten")
                 else:
-                    # Einzelne Tabelle auswählen
                     labels = [f"Tabelle {t['table_index']} auf Seite {t['page']} ({len(t['data'])-1} Zeilen)" for t in all_tables]
                     chosen = st.selectbox("Wähle die Tabelle zum Verarbeiten:", labels, key="table_select")
                     sel_idx = labels.index(chosen)
@@ -144,9 +136,7 @@ if st.button("PDF laden"):
                 st.session_state['sorted'] = False
                 st.session_state['scraped_results'] = None
             else:
-                st.warning("Keine Tabellen im PDF gefunden. "
-                           "Manche PDFs enthalten nur Text ohne erkennbare Tabellenstruktur – "
-                           "in diesem Fall schick mir gerne ein Beispiel.")
+                st.warning("Keine Tabellen im PDF gefunden.")
 
         except Exception as e:
             st.error(f"Fehler beim Laden des PDFs: {str(e)}")
@@ -166,7 +156,6 @@ if st.session_state.get('pdf_loaded', False):
     filtered_df = df.copy()
 
     if use_filter:
-        # --- Filter 1 ---
         filter_col1 = st.selectbox(
             "Filter 1 – Spalte:",
             available_columns,
@@ -183,7 +172,6 @@ if st.session_state.get('pdf_loaded', False):
             filtered_df = filtered_df[mask1]
             st.caption(f"Filter 1: {mask1.sum()} Zeilen gefunden")
 
-        # --- Filter 2 ---
         add_second_filter = st.checkbox("Zweiten Filter hinzufügen (beide müssen zutreffen)")
 
         if add_second_filter:
@@ -202,7 +190,6 @@ if st.session_state.get('pdf_loaded', False):
                 )
                 filtered_df = filtered_df[mask2]
 
-        # Zusammenfassung zeigen
         if filter_text1 or (add_second_filter and st.session_state.get("filter_text2")):
             st.info(f"✅ {len(filtered_df)} von {len(df)} Zeilen entsprechen den Filtern.")
     else:
@@ -274,36 +261,142 @@ if st.session_state.get('pdf_loaded', False):
             key="download_filtered"
         )
 
+# --- SCHRITT 2A: WEBSUCHE FÜR FEHLENDE URLS ---
+if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
+    st.header("Schritt 2a: Homepages im Web suchen (optional)")
+
+    available_columns = st.session_state['df_columns']
+    work_df = st.session_state['filtered_df'].copy()
+
+    st.markdown("""
+    **Wenn deine PDF keine Homepages enthält**, kannst du hier eine Websuche durchführen lassen.
+    Die App sucht nach "Praxisname + Ort" und findet mögliche Websites.
+    """)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        name_column = st.selectbox(
+            "Spalte mit Praxis/Namen:",
+            available_columns,
+            key="name_col_websearch"
+        )
+
+    with col2:
+        location_column = st.selectbox(
+            "Spalte mit Ort/Kanton (optional):",
+            ["— Keine —"] + available_columns,
+            key="location_col_websearch"
+        )
+
+    # API-Auswahl
+    st.subheader("🔍 Suchmethode wählen")
+
+    search_method = st.radio(
+        "Welche Websuche soll verwendet werden?",
+        [
+            "DuckDuckGo (kostenlos, keine Registrierung)",
+            "SerpApi Google Search (bessere Ergebnisse, braucht API-Key)"
+        ],
+        key="search_method"
+    )
+
+    serapi_key = ""
+    if "SerpApi" in search_method:
+        serapi_key = st.text_input(
+            "SerpApi API-Key eingeben:",
+            type="password",
+            help="API-Key unter https://serpapi.com/ erhalten. Kostenlos bis 100 Suchen/Monat."
+        )
+        if not serapi_key:
+            st.warning("⚠️ Ohne API-Key funktioniert SerpApi nicht. Alternativ DuckDuckGo wählen.")
+
+    max_websearch_rows = st.slider(
+        "Maximale Anzahl Zeilen websuchen:",
+        1,
+        len(work_df),
+        min(len(work_df), 20),
+        key="max_websearch"
+    )
+
+    if st.button("Websuche durchführen 🔍"):
+        progress_ws = st.progress(0)
+        status_ws = st.empty()
+
+        done = 0
+        for idx, row in work_df.head(max_websearch_rows).iterrows():
+            done += 1
+            status_ws.text(f"Suche {done}/{max_websearch_rows}: {row[name_column]}")
+
+            name = str(row[name_column]).strip()
+            location = ""
+
+            if location_column != "— Keine —":
+                location = str(row[location_column]).strip()
+
+            # Suchbegriff bauen
+            query = f"{name}"
+            if location:
+                query += f" {location}"
+
+            homepage_url = search_for_homepage(query, search_method, serapi_key)
+
+            if homepage_url:
+                work_df.at[idx, 'Gesuchte_Homepage'] = homepage_url
+            else:
+                work_df.at[idx, 'Gesuchte_Homepage'] = "Nicht gefunden"
+
+            progress_ws.progress(done / max_websearch_rows)
+            time.sleep(2)  # Rate limiting
+
+        status_ws.text("Websuche abgeschlossen! ✅")
+
+        # Spalte ans Ende sortieren
+        cols = [c for c in work_df.columns if c != 'Gesuchte_Homepage'] + ['Gesuchte_Homepage']
+        work_df = work_df[cols]
+
+        st.session_state['filtered_df'] = work_df
+        st.session_state['websuche_completed'] = True
+
+        found_count = (work_df['Gesuchte_Homepage'] != 'Nicht gefunden').sum()
+        st.info(f"✅ {found_count} von {len(work_df)} Homepages gefunden.")
+
+        st.subheader("Ergebnisse der Websuche")
+        st.dataframe(work_df[[name_column] + (['Gesuchte_Homepage'] if 'Gesuchte_Homepage' in work_df.columns else [])], use_container_width=True)
+
+    if st.session_state.get('websuche_completed'):
+        st.info("💾 Die Tabelle enthält jetzt die Spalte 'Gesuchte_Homepage'. Weiter mit Schritt 3!")
+
 # --- SCHRITT 3: HOMEPAGE EXTRACTION ---
 if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     st.header("Schritt 3: Informationen von Homepages extrahieren")
 
     work_df = st.session_state['filtered_df']
+    available_columns = list(work_df.columns)
 
     col1, col2 = st.columns(2)
 
     with col1:
         homepage_col = st.selectbox(
-            "Spalte mit Homepage-URL oder Name der Praxis:",
-            st.session_state['df_columns'],
-            key="homepage_col"
+            "Spalte mit Homepage-URL:",
+            available_columns,
+            key="homepage_col_extract"
         )
 
     with col2:
         info_columns = st.multiselect(
             "Welche Informationen sollen extrahiert werden?",
             ["Name", "Mailadresse", "Telefon", "Adresse", "Über uns", "Dienstleistungen"],
-            default=["Name", "Mailadresse"],
-            key="info_cols"
+            default=["Name", "Mailadresse", "Dienstleistungen"],
+            key="info_cols_extract"
         )
 
     st.info("""
     **Hinweis:**
     - Die Website muss öffentlich zugänglich sein
     - Manche Seiten benötigen JavaScript (dann funktioniert dies eventuell nicht vollständig)
-    - Die App wartet 1 Sekunde zwischen Anfragen, um die Server zu schonen
-    - **Tipp gegen Drosselung:** lieber mehrere kleine Durchläufe (10–20 Zeilen) machen
-      als einen großen – die App verbraucht dann weniger Ressourcen auf einmal.
+    - Die App wartet 1 Sekunde zwischen Anfragen
+    - **Tipp:** Bei vielen Zeilen mehrere kleine Durchläufe machen (10–20 Zeilen)
     """)
 
     num_rows = len(work_df)
@@ -327,14 +420,17 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
 
             homepage_value = str(row[homepage_col]).strip()
 
+            if (not homepage_value
+                    or homepage_value == "Nicht gefunden"
+                    or homepage_value.lower().startswith(('http://', 'https://')) is False
+                    and '.' not in homepage_value):
+                homepage_value = ""
+
             if homepage_value and not homepage_value.lower().startswith(('http://', 'https://')):
-                if '.' in homepage_value:
-                    homepage_value = f"https://{homepage_value}"
-                else:
-                    homepage_value = f"Keine URL: {homepage_value}"
+                homepage_value = f"https://{homepage_value}"
 
             try:
-                if homepage_value.startswith('http'):
+                if homepage_value:
                     extracted_info = extract_site_information(homepage_value, info_columns)
                     results.append({
                         'Zeile': processed,
@@ -345,7 +441,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
                     results.append({
                         'Zeile': processed,
                         **{col: row[col] for col in work_df.columns},
-                        'Error': homepage_value
+                        'Error': 'Keine gültige Homepage-URL vorhanden'
                     })
             except Exception as e:
                 results.append({
@@ -361,7 +457,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
         st.session_state['scraped_results'] = results
 
         result_out_df = pd.DataFrame(results)
-        st.success(f"✅ {len(results)} Websites bearbeitet")
+        st.success(f"✅ {len(results)} Zeilen bearbeitet")
 
         st.subheader("Ergebnisse")
         st.dataframe(result_out_df, use_container_width=True)
@@ -375,15 +471,87 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
             key="download_results"
         )
 
-    elif st.session_state.get('scraped_results'):
-        st.subheader("Letzte Ergebnisse")
-        st.dataframe(pd.DataFrame(st.session_state['scraped_results']), use_container_width=True)
-
 # --- HILFSFUNKTIONEN ---
+def search_for_homepage(query: str, method: str, serpapi_key: str = "") -> Optional[str]:
+    """Sucht im Web nach einer Homepage basierend auf dem Suchbegriff"""
+    try:
+        if "DuckDuckGo" in method:
+            return search_duckduckgo(query)
+        else:
+            return search_serpapi(query, serpapi_key)
+    except Exception:
+        return None
+
+def search_duckduckgo(query: str) -> Optional[str]:
+    """Nutzt DuckDuckGo HTML-Suche (einfach, kostenlos)"""
+    url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+
+    try:
+        response = requests.post(url, data={'q': query}, headers=headers, timeout=15)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'lxml')
+
+        results = soup.select('a.result__a')
+
+        if results:
+            first_link = results[0].get('href', '')
+
+            # DuckDuckGo leitet manchmal über uddg= Parameter weiter
+            if 'uddg=' in first_link:
+                import urllib.parse as up
+                parsed = up.parse_qs(up.urlparse(first_link).query)
+                if 'uddg' in parsed:
+                    first_link = parsed['uddg'][0]
+
+            # Verzeichnisse/Vergleichsportale ausschließen (sind nicht die eigene Homepage)
+            excluded_domains = ['local.ch', 'search.ch', 'yellow.local.ch', 'facebook.com',
+                                'linkedin.com', 'twitter.com', 'instagram.com', 'youtube.com',
+                                'wikipedia.org', 'doctorfmh.ch', 'med待']
+
+            domain = urlparse(first_link).netloc.lower()
+            if domain and not any(excl in domain for excl in excluded_domains):
+                return first_link
+
+        return None
+    except Exception:
+        return None
+
+def search_serpapi(query: str, api_key: str) -> Optional[str]:
+    """Nutzt SerpApi Google Search"""
+    if not api_key:
+        return None
+
+    url = "https://serpapi.com/search"
+    params = {
+        'engine': 'google',
+        'q': query,
+        'api_key': api_key,
+        'num': 5
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
+
+        excluded_domains = ['local.ch', 'search.ch', 'facebook.com', 'linkedin.com',
+                            'wikipedia.org', 'doctorfmh.ch']
+
+        for res in data.get('organic_results', []):
+            link = res.get('link', '')
+            domain = urlparse(link).netloc.lower()
+            if domain and not any(excl in domain for excl in excluded_domains):
+                return link
+
+        return None
+    except Exception:
+        return None
+
 def extract_site_information(url: str, info_types: List[str]) -> Dict[str, Optional[str]]:
-    """
-    Extrahiert verschiedene Informationen von einer Website
-    """
+    """Extrahiert verschiedene Informationen von einer Website"""
     result = {}
 
     try:
@@ -418,7 +586,7 @@ def extract_site_information(url: str, info_types: List[str]) -> Dict[str, Optio
 
         if 'Dienstleistungen' in info_types:
             services = extract_services(soup)
-            result['Dienstleistungen'] = '; '.join(services[:5]) if services else 'Keine gefunden'
+            result['Dienstleistungen'] = '; '.join(services[:8]) if services else 'Keine gefunden'
 
     except requests.exceptions.RequestException as e:
         result['Error'] = f"HTTP Error: {str(e)}"
@@ -433,9 +601,10 @@ def extract_emails(text: str) -> List[str]:
 
 def extract_phone_numbers(text: str) -> List[str]:
     """Sucht nach Telefonnummern"""
-    pattern = r'(?:\+\d{2}|0)\s*\(?[0-9]{2,5}\)?[\s.-]*[0-9\s.-]+'
+    pattern = r'(?:\+\d{2}|0)\s*\(?[0-9]{2,5}\)?[\s.\-/][0-9\s.\-]{6,}'
     phones = re.findall(pattern, text)
-    return list(set(phones))[:5]
+    cleaned = [p.strip() for p in phones if len(re.sub(r'\D', '', p)) >= 9]
+    return list(set(cleaned))[:5]
 
 def extract_addresses(soup: BeautifulSoup, text: str) -> List[str]:
     """Versucht Adressen zu finden"""
@@ -452,7 +621,7 @@ def extract_addresses(soup: BeautifulSoup, text: str) -> List[str]:
 
 def extract_about_section(soup: BeautifulSoup) -> str:
     """Sucht nach 'Über uns' Text"""
-    about_keywords = ['über uns', 'about us', 'unternehmen', 'firma', 'wir']
+    about_keywords = ['über uns', 'about us', 'unternehmen', 'firma', 'praxis', 'praxisportrait']
 
     for tag in soup.find_all(['p', 'div']):
         classes = ' '.join(tag.get('class', [])).lower()
@@ -472,13 +641,37 @@ def extract_services(soup: BeautifulSoup) -> List[str]:
     """Sucht nach Dienstleistungs-Listen"""
     services = []
 
-    lists = soup.find_all('ul', class_=re.compile(r'(service|angebot|dienstleistung)', re.I))
+    service_patterns = [
+        'service', 'angebot', 'dienstleistung', 'leistungen', 'behandlung',
+        'therapie', 'therapien', 'methoden', 'anwendung'
+    ]
 
-    for lst in lists[:2]:
-        for li in lst.find_all('li')[:5]:
-            services.append(li.get_text(strip=True))
+    for pattern in service_patterns:
+        lists = soup.find_all(['ul', 'ol'], class_=re.compile(pattern, re.I))
+        for lst in lists:
+            for li in lst.find_all('li')[:10]:
+                service_text = li.get_text(strip=True)
+                if 10 < len(service_text) < 100:
+                    services.append(service_text)
 
-    return services[:10]
+    # Auch Container mit passenden IDs/Klassen durchsuchen
+    for container in soup.find_all(['section', 'div'], class_=re.compile(r'(leistungen|behandlung|angebote|services)', re.I)):
+        for li in container.find_all('li')[:10]:
+            service_text = li.get_text(strip=True)
+            if 10 < len(service_text) < 100 and service_text not in services:
+                services.append(service_text)
+
+    # H2/H3-Überschriften wie "Unsere Behandlungen" folgen
+    for heading in soup.find_all(['h2', 'h3']):
+        if any(keyword in heading.get_text().lower() for keyword in ['behandlung', 'leistung', 'angebot', 'therapie', 'methoden']):
+            sibling = heading.find_next(['ul', 'ol'])
+            if sibling:
+                for li in sibling.find_all('li')[:10]:
+                    service_text = li.get_text(strip=True)
+                    if 10 < len(service_text) < 100 and service_text not in services:
+                        services.append(service_text)
+
+    return services[:15]
 
 # --- FOOTER ---
 st.markdown("---")
