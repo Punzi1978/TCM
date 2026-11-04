@@ -81,7 +81,7 @@ if st.button("PDF laden"):
 
                 # Konvertiere zu DataFrame
                 df = pd.DataFrame(selected_table_data[1:], columns=selected_table_data[0])
-                # Index neu setzen, damit er stabil bleibt (wichtig für Fortschrittsanzeige!)
+                # Index neu setzen, damit er stabil bleibt
                 df = df.reset_index(drop=True)
 
                 st.dataframe(df.head(), use_container_width=True)
@@ -108,27 +108,50 @@ if st.session_state.get('pdf_loaded', False):
     # ===== FILTERUNG =====
     st.subheader("🔎 Filter")
 
-    use_filter = st.checkbox("Nur Zeilen anzeigen, die einen bestimmten Eintrag enthalten", value=True)
+    use_filter = st.checkbox("Nur Zeilen anzeigen, die bestimmte Einträge enthalten", value=True)
 
     filtered_df = df.copy()
 
     if use_filter:
-        filter_col = st.selectbox(
-            "Nach welcher Spalte filtern?",
+        # --- Filter 1 ---
+        filter_col1 = st.selectbox(
+            "Filter 1 – Spalte:",
             available_columns,
-            key="filter_col"
+            key="filter_col1"
         )
-        search_text = st.text_input(
-            "Welcher Eintrag soll enthalten sein? (z. B. Kanton, Stadt, Fachrichtung)",
-            key="filter_text"
+        filter_text1 = st.text_input(
+            "Filter 1 – Welcher Eintrag soll enthalten sein?",
+            key="filter_text1"
         )
-
-        if search_text:
-            mask = filtered_df[filter_col].astype(str).str.contains(
-                search_text, case=False, na=False
+        if filter_text1:
+            mask1 = filtered_df[filter_col1].astype(str).str.contains(
+                filter_text1, case=False, na=False
             )
-            filtered_df = filtered_df[mask]
-            st.info(f"✅ {len(filtered_df)} von {len(df)} Zeilen entsprechen dem Filter.")
+            filtered_df = filtered_df[mask1]
+            st.caption(f"Filter 1: {mask1.sum()} Zeilen gefunden")
+
+        # --- Filter 2 ---
+        add_second_filter = st.checkbox("Zweiten Filter hinzufügen (beide müssen zutreffen)")
+
+        if add_second_filter:
+            filter_col2 = st.selectbox(
+                "Filter 2 – Spalte:",
+                available_columns,
+                key="filter_col2"
+            )
+            filter_text2 = st.text_input(
+                "Filter 2 – Welcher Eintrag soll enthalten sein?",
+                key="filter_text2"
+            )
+            if filter_text2:
+                mask2 = filtered_df[filter_col2].astype(str).str.contains(
+                    filter_text2, case=False, na=False
+                )
+                filtered_df = filtered_df[mask2]
+
+        # Zusammenfassung zeigen
+        if filter_text1 or (add_second_filter and st.session_state.get("filter_text2")):
+            st.info(f"✅ {len(filtered_df)} von {len(df)} Zeilen entsprechen den Filtern.")
     else:
         st.caption("Kein Filter aktiv – alle Zeilen werden verwendet.")
 
@@ -190,7 +213,6 @@ if st.session_state.get('pdf_loaded', False):
         st.subheader("Vorschau der gefilterten & sortierten Tabelle")
         st.dataframe(st.session_state['filtered_df'], use_container_width=True)
 
-        # Gefilterte Tabelle auch herunterladbar machen
         csv_filtered = st.session_state['filtered_df'].to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Gefilterte Tabelle als CSV herunterladen",
@@ -228,6 +250,8 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     - Die Website muss öffentlich zugänglich sein
     - Manche Seiten benötigen JavaScript (dann funktioniert dies eventuell nicht vollständig)
     - Die App wartet 1 Sekunde zwischen Anfragen, um die Server zu schonen
+    - **Tipp gegen Drosselung:** lieber mehrere kleine Durchläufe (10–20 Zeilen) machen
+      als einen großen – die App verbraucht dann weniger Ressourcen auf einmal.
     """)
 
     num_rows = len(work_df)
@@ -243,7 +267,6 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        # WICHTIG: Mit eigenem Zähler arbeiten, nicht mit dem DataFrame-Index!
         processed = 0
 
         for _, row in work_df.head(max_rows).iterrows():
@@ -257,9 +280,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
                 if '.' in homepage_value:  # sieht aus wie eine Domain
                     homepage_value = f"https://{homepage_value}"
                 else:
-                    # Suchbegriff aus Namen bauen
-                    suche = homepage_value.replace(' ', '+')
-                    homepage_value = f"Suche: {suche}"
+                    homepage_value = f"Keine URL: {homepage_value}"
 
             try:
                 if homepage_value.startswith('http'):
@@ -273,7 +294,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
                     results.append({
                         'Zeile': processed,
                         **{col: row[col] for col in work_df.columns},
-                        'Error': f"Keine gültige URL gefunden ({homepage_value})"
+                        'Error': homepage_value
                     })
             except Exception as e:
                 results.append({
@@ -282,7 +303,6 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
                     'Error': str(e)
                 })
 
-            # Fortschritt mit Zähler (0.0 bis 1.0 garantiert)
             progress_bar.progress(processed / max_rows)
             time.sleep(1)  # Server schonen
 
@@ -295,7 +315,6 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
         st.subheader("Ergebnisse")
         st.dataframe(result_out_df, use_container_width=True)
 
-        # Download Button
         csv = result_out_df.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 Ergebnisse als CSV herunterladen",
@@ -305,7 +324,6 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
             key="download_results"
         )
 
-    # Falls bereits Ergebnisse vorhanden sind, weiterhin anzeigen
     elif st.session_state.get('scraped_results'):
         st.subheader("Letzte Ergebnisse")
         st.dataframe(pd.DataFrame(st.session_state['scraped_results']), use_container_width=True)
@@ -326,33 +344,27 @@ def extract_site_information(url: str, info_types: List[str]) -> Dict[str, Optio
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'lxml')
 
-        # Titel/Name extrahieren
         if 'Name' in info_types:
             title_tag = soup.find('title')
             h1_tag = soup.find('h1')
             result['Name'] = title_tag.get_text().strip() if title_tag else (h1_tag.get_text().strip() if h1_tag else 'Nicht gefunden')
 
-        # Mailadressen extrahieren
         if 'Mailadresse' in info_types:
             emails = extract_emails(response.text)
             result['Mailadresse'] = '; '.join(emails[:3]) if emails else 'Keine gefunden'
 
-        # Telefonnummern extrahieren
         if 'Telefon' in info_types:
             phones = extract_phone_numbers(response.text)
             result['Telefon'] = '; '.join(phones[:3]) if phones else 'Keine gefunden'
 
-        # Adresse extrahieren
         if 'Adresse' in info_types:
             addresses = extract_addresses(soup, response.text)
             result['Adresse'] = addresses[:2] if addresses else 'Keine gefunden'
 
-        # Über uns Text
         if 'Über uns' in info_types:
             about_text = extract_about_section(soup)
             result['Über uns'] = about_text[:200] + '...' if about_text else 'Nicht gefunden'
 
-        # Dienstleistungen
         if 'Dienstleistungen' in info_types:
             services = extract_services(soup)
             result['Dienstleistungen'] = '; '.join(services[:5]) if services else 'Keine gefunden'
