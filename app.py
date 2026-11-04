@@ -30,7 +30,7 @@ st.set_page_config(
 st.title("📄 PDF Tabellenscraper & Informations-Extraktor")
 st.markdown("""
 Diese Web-Anwendung:
-1. Lädt eine PDF-Tabelle von einer URL herunter
+1. Lädt eine PDF-Tabelle von einer URL herunter (alle Seiten werden zusammengeführt)
 2. Filtert und sortiert die Tabelle nach ausgewählten Spalten
 3. Sucht für jede sichtbare Zeile Informationen auf verlinkten Homepages
 4. Extrahiert Praxis-Namen, Mailadressen und weitere Details
@@ -56,36 +56,87 @@ if st.button("PDF laden"):
 
             with st.spinner("PDF wird geparst..."):
                 with pdfplumber.open(io.BytesIO(response.content)) as pdf:
-                    tables = []
+                    all_tables = []
                     for i, page in enumerate(pdf.pages):
                         extracted_tables = page.extract_tables()
                         for j, table in enumerate(extracted_tables):
-                            if table:
-                                tables.append({
+                            if table and len(table) > 0:
+                                all_tables.append({
                                     'page': i + 1,
                                     'table_index': j + 1,
                                     'data': table
                                 })
 
-            if tables:
-                st.success(f"{len(tables)} Tabelle(n) gefunden.")
+            if all_tables:
+                st.success(f"{len(all_tables)} Tabelle(n) auf {all_tables[-1]['page']} Seite(n) gefunden.")
 
-                tab_selection = st.selectbox(
-                    "Wähle die Tabelle zum Verarbeiten:",
-                    [f"Tabelle {t['table_index']} auf Seite {t['page']}" for t in tables],
-                    key="table_select"
+                # ===== NEU: Tabellen zusammenführen =====
+                merge_mode = st.radio(
+                    "Wie sollen die Tabellen verarbeitet werden?",
+                    [
+                        "Alle Seiten zu EINER Tabelle zusammenführen (empfohlen)",
+                        "Nur eine einzelne Tabelle auswählen"
+                    ],
+                    key="merge_mode"
                 )
 
-                selected_idx = int(tab_selection.split()[1]) - 1
-                selected_table_data = tables[selected_idx]['data']
+                if merge_mode.startswith("Alle Seiten"):
+                    # Erste Tabelle liefert die Spaltennamen (Kopfzeile)
+                    header_row = all_tables[0]['data'][0]
 
-                # Konvertiere zu DataFrame
-                df = pd.DataFrame(selected_table_data[1:], columns=selected_table_data[0])
-                # Index neu setzen, damit er stabil bleibt
-                df = df.reset_index(drop=True)
+                    # Sicherstellen, dass keine leeren/doppelten Spaltennamen existieren
+                    seen = {}
+                    clean_header = []
+                    for col in header_row:
+                        col = str(col).strip() if col else "Unbenannt"
+                        if col in seen:
+                            seen[col] += 1
+                            clean_header.append(f"{col}_{seen[col]}")
+                        else:
+                            seen[col] = 0
+                            clean_header.append(col)
 
-                st.dataframe(df.head(), use_container_width=True)
-                st.caption(f"Gesamte Zeilen: {len(df)}")
+                    all_rows = []
+                    header_strs = {str(h).strip() for h in clean_header}
+
+                    for t in all_tables:
+                        for row in t['data']:
+                            row_clean = [str(c).strip() if c is not None else "" for c in row]
+                            # Kopfzeilen-Wiederholungen überspringen (auf Folgeseiten)
+                            if set(filter(None, row_clean)) and set(filter(None, row_clean)).issubset(header_strs):
+                                continue
+                            # Vollständig leere Zeilen überspringen
+                            if not any(row_clean):
+                                continue
+                            all_rows.append(row_clean)
+
+                    # Zeilen mit zu wenigen Werten auf leere Spalten auffüllen
+                    n_cols = len(clean_header)
+                    fixed_rows = []
+                    for row in all_rows:
+                        if len(row) < n_cols:
+                            row = row + [""] * (n_cols - len(row))
+                        elif len(row) > n_cols:
+                            row = row[:n_cols]
+                        fixed_rows.append(row)
+
+                    df = pd.DataFrame(fixed_rows, columns=clean_header)
+                    df = df.reset_index(drop=True)
+
+                    st.info(f"ℹ️ Zusammengeführt: {len(df)} Datenzeilen aus {len(all_tables)} Tabellensegmenten "
+                            f"(wiederholte Kopfzeilen und Leerzeilen wurden automatisch entfernt).")
+                else:
+                    # Einzelne Tabelle auswählen
+                    labels = [f"Tabelle {t['table_index']} auf Seite {t['page']} ({len(t['data'])-1} Zeilen)" for t in all_tables]
+                    chosen = st.selectbox("Wähle die Tabelle zum Verarbeiten:", labels, key="table_select")
+                    sel_idx = labels.index(chosen)
+                    selected_table_data = all_tables[sel_idx]['data']
+
+                    df = pd.DataFrame(selected_table_data[1:], columns=selected_table_data[0])
+                    df = df.reset_index(drop=True)
+
+                st.dataframe(df.head(15), use_container_width=True)
+                st.caption(f"Gesamte Zeilen: {len(df)} | Spalten: {len(df.columns)}")
 
                 st.session_state['pdf_df'] = df
                 st.session_state['df_columns'] = list(df.columns)
@@ -93,7 +144,9 @@ if st.button("PDF laden"):
                 st.session_state['sorted'] = False
                 st.session_state['scraped_results'] = None
             else:
-                st.warning("Keine Tabellen im PDF gefunden.")
+                st.warning("Keine Tabellen im PDF gefunden. "
+                           "Manche PDFs enthalten nur Text ohne erkennbare Tabellenstruktur – "
+                           "in diesem Fall schick mir gerne ein Beispiel.")
 
         except Exception as e:
             st.error(f"Fehler beim Laden des PDFs: {str(e)}")
@@ -190,7 +243,6 @@ if st.session_state.get('pdf_loaded', False):
     if st.button("Filter und Sortierung anwenden"):
         result_df = filtered_df.copy()
 
-        # Sortierung anwenden
         ascending1 = sort_order1 == "Aufsteigend (A-Z)"
         if add_second_sort and sort_col2:
             ascending2 = sort_order2 == "Aufsteigend (A-Z)"
@@ -275,9 +327,8 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
 
             homepage_value = str(row[homepage_col]).strip()
 
-            # Versuche URL zu bauen wenn nur Name angegeben
             if homepage_value and not homepage_value.lower().startswith(('http://', 'https://')):
-                if '.' in homepage_value:  # sieht aus wie eine Domain
+                if '.' in homepage_value:
                     homepage_value = f"https://{homepage_value}"
                 else:
                     homepage_value = f"Keine URL: {homepage_value}"
@@ -304,7 +355,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
                 })
 
             progress_bar.progress(processed / max_rows)
-            time.sleep(1)  # Server schonen
+            time.sleep(1)
 
         status_text.text("Fertig! ✅")
         st.session_state['scraped_results'] = results
