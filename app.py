@@ -50,7 +50,6 @@ GENERAL_EMAIL_PROVIDERS = [
 def is_general_provider(domain: str) -> bool:
     """Prüft ob eine Domain ein bekannter allgemeiner E-Mail-Provider ist"""
     domain = domain.lower().strip()
-    # Exakter Match in der Liste
     return domain in GENERAL_EMAIL_PROVIDERS
 
 def extract_domain_from_email(email: str) -> Optional[str]:
@@ -69,16 +68,11 @@ def extract_domain_from_email(email: str) -> Optional[str]:
         domain = email.split('@')[1].strip()
         domain = domain.lower()
 
-        # Prüfen ob es eine plausible Domain ist
         if not domain or '.' not in domain:
             return None
 
-        # WICHTIG: Bekannte Provider ausschließen
         if is_general_provider(domain):
             return None
-
-        # Akzeptiere alle anderen .ch, .net, .com Domains (Praxis-Domains!)
-        # .net und .com sind auch okay, wenn es eine Praxis-Domain ist
 
         homepage = f"https://{domain}"
         return homepage
@@ -123,7 +117,6 @@ def search_ddgs_library(query: str, restrict_to_ch: bool = True) -> Optional[str
             else:
                 results = list(ddgs.text(query, max_results=20))
 
-        # Prioritäten: Erst echte Praxishomepages, dann andere
         for res in results:
             link = res.get('href', '') or res.get('link', '')
             if not link:
@@ -132,18 +125,14 @@ def search_ddgs_library(query: str, restrict_to_ch: bool = True) -> Optional[str
             domain = urlparse(link).netloc.lower()
             title = (res.get('title', '') or res.get('headline', '')).lower()
 
-            # Exklusive Domains überspringen
             if any(excl in domain for excl in excluded_domains):
                 continue
 
-            # .ch Domain finden
             if '.ch' in domain:
-                # Prüfen ob es eine Verzeichnis-Seite ist (oft im Title oder URL)
                 dir_keywords = ['verzeichnis', 'liste', 'finder', 'portal', 'anbieter', 'übersicht', 'directory', 'praxisfinder', 'therapeuten', 'suche']
                 if any(kw in title for kw in dir_keywords) or any(kw in domain for kw in dir_keywords):
                     continue
 
-                # Kurz genug? (zu lange URLs oft Verzeichnisse)
                 if len(link) > 150:
                     continue
 
@@ -331,7 +320,7 @@ Diese Web-Anwendung:
 2. Filtert und sortiert die Tabelle nach ausgewählten Spalten
 3. Sucht **automatisch** nach Homepages:
    - Zuerst: E-Mail-Adresse → Domain extrahieren (nur bei echten Praxis-Domains!)
-   - Dann: Web-Suche mit Namen + Ort + Filter-Kriterien (nur .ch Domains)
+   - Dann: Web-Suche mit Namen + Ort + Filter 1 (nur .ch Domains)
 4. Extrahiert Praxis-Namen, Mailadressen, Telefon, Dienstleistungen und weitere Details
 5. Exportiert alle gesammelten Informationen als CSV
 """)
@@ -475,11 +464,8 @@ if st.session_state.get('pdf_loaded', False):
     use_filter = st.checkbox("Nur Zeilen anzeigen, die bestimmte Einträge enthalten", value=True)
 
     filtered_df = df.copy()
-    filter_col1 = None
-    filter_text1 = None
-    add_second_filter = False
-    filter_col2 = None
-    filter_text2 = None
+    ws_filter_col1 = None
+    ws_filter_text1 = None
 
     if use_filter:
         filter_col1 = st.selectbox(
@@ -518,6 +504,11 @@ if st.session_state.get('pdf_loaded', False):
 
         if filter_text1 or (add_second_filter and st.session_state.get("filter_text2")):
             st.info(f"✅ {len(filtered_df)} von {len(df)} Zeilen entsprechen den Filtern.")
+
+        # Filter 1 für die Websuche in Schritt 2b merken
+        # (unter EIGENEM Namen, NICHT gleich dem Widget-Key!)
+        ws_filter_col1 = filter_col1
+        ws_filter_text1 = filter_text1
     else:
         st.caption("Kein Filter aktiv – alle Zeilen werden verwendet.")
 
@@ -571,10 +562,9 @@ if st.session_state.get('pdf_loaded', False):
         result_df = result_df.reset_index(drop=True)
         st.session_state['filtered_df'] = result_df
         st.session_state['sorted'] = True
-        st.session_state['filter_col1'] = filter_col1
-        st.session_state['filter_text1'] = filter_text1
-        st.session_state['filter_col2'] = filter_col2
-        st.session_state['filter_text2'] = filter_text2
+        # Eigene Session-Namen (keine Kollision mit Widget-Keys!)
+        st.session_state['ws_filter_col1'] = ws_filter_col1
+        st.session_state['ws_filter_text1'] = ws_filter_text1
         st.success(f"Tabelle verarbeitet! {len(result_df)} Zeilen bereit.")
 
     if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
@@ -601,19 +591,14 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     **Die App sucht jetzt in dieser Reihenfolge:**
     1. 📧 **E-Mail-Adressen** → Domain extrahieren (nur bei echten Praxis-Domains!)
     2. 🔗 **Vorhandene URLs** → Direkt verwenden
-    3. 🌐 **Websuche** → Name + Ort + Filter-Kriterien (nur .ch Domains)
+    3. 🌐 **Websuche** → Name + Ort + **Filter 1** (nur .ch Domains)
     """)
 
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        # AUTOMATISCHE VORAUSWAHL der E-Mail-Spalte wenn verfügbar
         email_options = ["— Keine —"] + st.session_state.get('possible_email_cols', [])
-        # Wenn nur eine Option verfügbar ist, diese vorauswählen
-        if len(st.session_state.get('possible_email_cols', [])) == 1:
-            email_default_index = 1
-        else:
-            email_default_index = 0
+        email_default_index = 1 if len(st.session_state.get('possible_email_cols', [])) == 1 else 0
         email_col = st.selectbox(
             "E-Mail-Spalte:",
             email_options,
@@ -633,11 +618,10 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
 
     with col3:
         name_options = st.session_state.get('possible_name_cols', available_columns)
-        name_default_index = 1 if len(name_options) > 1 and "—" not in str(name_options[0]) else 0
         name_col = st.selectbox(
             "Name-Spalte:",
             name_options,
-            index=name_default_index,
+            index=0 if name_options else 0,
             key="name_col"
         )
 
@@ -654,12 +638,18 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     st.divider()
     st.subheader("🔍 Websuche-Einstellungen (wird nur benutzt, falls keine E-Mail/URL vorhanden)")
 
+    ws_filter_text1 = st.session_state.get('ws_filter_text1')
+    if ws_filter_text1:
+        st.success(f"💡 Filter 1 wird in die Websuche einbezogen: **„{ws_filter_text1}“**")
+    else:
+        st.caption("ℹ️ Es ist kein Filter 1 gesetzt – die Suche nutzt nur Name + Ort.")
+
     st.info("""
-    **Verbesserte Websuche:**
-    - Suchbegriffe: Name + Ort + **Filter 1 Kriterien** (falls gesetzt)
-    - Beispiel: "Dr. Müller Zürich TCM" wenn Filter 1 = "Fachrichtung" enthält "TCM"
+    **Websuche-Bestandteile:**
+    - Name (aus Name-Spalte) + Ort (aus Ort-Spalte) + **Filter 1-Eintrag**
+    - Beispiel: "Dr. Müller Zürich TCM schweiz praxis"
     - Nur .ch Domains werden berücksichtigt
-    - Verzeichnisse (Local.ch, Search.ch) werden ignoriert
+    - Verzeichnisse (Local.ch, Search.ch, Praxisfinder) werden ignoriert
     """)
 
     search_method = st.radio(
@@ -727,16 +717,13 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
 
         search_done = 0
 
-        # Filter 1 und Filter 2 für Websuche extrahieren
-        filter_terms = []
-        if st.session_state.get('filter_text1'):
-            filter_terms.append(st.session_state['filter_text1'])
-        if st.session_state.get('filter_text2'):
-            filter_terms.append(st.session_state['filter_text2'])
+        # NUR Filter 1 für die Websuche verwenden (nicht Filter 2!)
+        filter_term = st.session_state.get('ws_filter_text1')
 
         for idx, row in work_df.head(total_rows).iterrows():
             homepage_found = None
             method_used = None
+            query = ""
 
             # 1. Prüfe E-Mail (nur Praxis-Domains)
             if email_col != "— Keine —":
@@ -762,23 +749,14 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
                     name = str(row[name_col]).strip() if name_col != "— Keine —" else ""
                     location = str(row[location_col]).strip() if location_col != "— Keine —" else ""
 
-                    # SUCHBEGRIFF AUS BAUSTEINEN ZUSAMMENSETZEN
+                    # SUCHBEGRIFF: Name + Ort + NUR Filter 1
                     query_parts = []
-
-                    # Name immer dazu
                     if name:
                         query_parts.append(name)
-
-                    # Ort dazu
                     if location:
                         query_parts.append(location)
-
-                    # Filter 1 Kriteria (z.B. Fachrichtung, Kanton)
-                    for term in filter_terms:
-                        if term:
-                            query_parts.append(term)
-
-                    # Immer "Schweiz" und ggf. "TCM" hinzufügen
+                    if filter_term:
+                        query_parts.append(filter_term)
                     query_parts.append("schweiz")
                     query_parts.append("praxis")
 
@@ -792,10 +770,10 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
 
             if homepage_found:
                 work_df.at[idx, 'Gefundene_Homepage'] = homepage_found
-                detail_log.append(f"✅ {row[name_col]} → {homepage_found} ({method_used}) | Suchbegriff: {query}")
+                detail_log.append(f"✅ {row[name_col]} → {homepage_found} ({method_used})")
             else:
                 work_df.at[idx, 'Gefundene_Homepage'] = "Nicht gefunden"
-                detail_log.append(f"❌ {row[name_col]} → Nicht gefunden")
+                detail_log.append(f"❌ {row[name_col]} → Nicht gefunden | Suchbegriff: {query}")
 
             status_ws.text(f"Bearbeitet {idx+1}/{total_rows} | Websuche {search_done}/{max_search_rows}")
             time.sleep(0.8)
@@ -854,7 +832,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     **Hinweis:**
     - Die Website muss öffentlich zugänglich sein
     - Manche Seiten benötigen JavaScript (dann funktioniert dies eventuell nicht vollständig)
-    - Die App wartet 0.8 Sekunden zwischen Anfragen
+    - Die App wartet 1 Sekunde zwischen Anfragen
     - **Tipp:** Bei vielen Zeilen mehrere kleine Durchläufe machen (10–20 Zeilen)
     """)
 
