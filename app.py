@@ -18,26 +18,52 @@ import re
 from urllib.parse import urljoin, urlparse, quote, parse_qs
 import io
 import urllib.parse as up
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import time
 
 # =============================================================================
 # HILFSFUNKTIONEN (MÜSSEN VOR DEM HAUPTCODE STEHEN!)
 # =============================================================================
 
-def search_for_homepage(query: str, method: str, serpapi_key: str = "") -> Optional[str]:
-    """Sucht im Web nach einer Homepage basierend auf dem Suchbegriff"""
+def extract_domain_from_email(email: str) -> Optional[str]:
+    """
+    Extrahiert die Domain aus einer E-Mail-Adresse und baut eine plausible Homepage
+    Beispiel: info@tcm-praxis.ch → https://tcm-praxis.ch
+    """
     try:
-        if "DuckDuckGo" in method:
-            return search_ddgs_library(query)
-        else:
-            return search_serpapi(query, serpapi_key)
+        if '@' not in email:
+            return None
+
+        domain = email.split('@')[1].strip()
+        # Entferne Pfade wie /mail/ oder Subdomains wie @www.
+        domain = domain.lower()
+
+        # Prüfe ob es eine plausible Domain ist
+        if not domain or '.' not in domain:
+            return None
+
+        # Nur .ch, .de, .at Domains (Schweizer Fokus)
+        if not domain.endswith('.ch'):
+            return None
+
+        homepage = f"https://{domain}"
+        return homepage
     except Exception:
         return None
 
-def search_ddgs_library(query: str) -> Optional[str]:
+def search_for_homepage(query: str, method: str, serpapi_key: str = "", restrict_to_ch: bool = True) -> Optional[str]:
+    """Sucht im Web nach einer Homepage basierend auf dem Suchbegriff"""
+    try:
+        if "DuckDuckGo" in method:
+            return search_ddgs_library(query, restrict_to_ch)
+        else:
+            return search_serpapi(query, serpapi_key, restrict_to_ch)
+    except Exception:
+        return None
+
+def search_ddgs_library(query: str, restrict_to_ch: bool = True) -> Optional[str]:
     """
-    Nutzt die ddgs-Bibliothek (zuverlässiger als direktes HTML-Scraping)
+    Nutzt die ddgs-Bibliothek mit Schweizer Fokus (.ch Domains)
     """
     try:
         from ddgs import DDGS
@@ -49,51 +75,88 @@ def search_ddgs_library(query: str) -> Optional[str]:
 
     excluded_domains = ['local.ch', 'search.ch', 'yellow.local.ch', 'facebook.com',
                         'linkedin.com', 'twitter.com', 'instagram.com', 'youtube.com',
-                        'wikipedia.org', 'doctorfmh.ch', 'reddit.com']
+                        'wikipedia.org', 'doctorfmh.ch', 'reddit.com', 'tripadvisor.com',
+                        'buch.ch', 'jameda.de', 'docdirekt.ch']
 
     try:
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=10))
+            if restrict_to_ch:
+                # Site-Beschränkung auf .ch hinzufügen
+                enhanced_query = f"{query} site:.ch"
+                results = list(ddgs.text(enhanced_query, max_results=15))
+            else:
+                results = list(ddgs.text(query, max_results=15))
 
+        # Priorisieren: Erst echte Praxishomepages, dann andere .ch Seiten
         for res in results:
             link = res.get('href', '') or res.get('link', '')
+            if not link:
+                continue
+
             domain = urlparse(link).netloc.lower()
-            if domain and not any(excl in domain for excl in excluded_domains):
+            title = (res.get('title', '') or res.get('headline', '')).lower()
+
+            # Exklusive Domains überspringen
+            if any(excl in domain for excl in excluded_domains):
+                continue
+
+            # .ch Domain finden
+            if '.ch' in domain:
+                # Prüfen ob es nicht eine Verzeichnis-Seite ist (oft im Title)
+                dir_keywords = ['verzeichnis', 'liste', 'finder', 'portal', 'anbieter', 'übersicht', 'directory']
+                if any(kw in title for kw in dir_keywords):
+                    continue
+
                 return link
 
         return None
     except Exception:
         return None
 
-def search_serpapi(query: str, api_key: str) -> Optional[str]:
-    """Nutzt SerpApi Google Search"""
+def search_serpapi(query: str, api_key: str, restrict_to_ch: bool = True) -> Optional[str]:
+    """Nutzt SerpApi Google Search mit Schweizer Fokus"""
     if not api_key:
         return None
 
     url = "https://serpapi.com/search"
+
     params = {
         'engine': 'google',
         'q': query,
         'api_key': api_key,
-        'num': 5
+        'num': 10,
+        'gl': 'ch'  # Schweiz-Region
     }
+
+    if restrict_to_ch:
+        params['site_search'] = '.ch'
 
     try:
         response = requests.get(url, params=params, timeout=15)
         data = response.json()
 
         excluded_domains = ['local.ch', 'search.ch', 'facebook.com', 'linkedin.com',
-                            'wikipedia.org', 'doctorfmh.ch']
+                            'wikipedia.org', 'doctorfmh.ch', 'tripadvisor.com', 'jameda.de']
 
         for res in data.get('organic_results', []):
             link = res.get('link', '')
             domain = urlparse(link).netloc.lower()
-            if domain and not any(excl in domain for excl in excluded_domains):
+
+            if any(excl in domain for excl in excluded_domains):
+                continue
+
+            if '.ch' in domain:
                 return link
 
         return None
     except Exception:
         return None
+
+def extract_emails(text: str) -> List[str]:
+    """Sucht nach E-Mail Adressen im Text"""
+    pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    emails = re.findall(pattern, text)
+    return list(set(emails))
 
 def extract_site_information(url: str, info_types: List[str]) -> Dict[str, Optional[str]]:
     """Extrahiert verschiedene Informationen von einer Website"""
@@ -137,12 +200,6 @@ def extract_site_information(url: str, info_types: List[str]) -> Dict[str, Optio
         result['Error'] = f"HTTP Error: {str(e)}"
 
     return result
-
-def extract_emails(text: str) -> List[str]:
-    """Sucht nach E-Mail Adressen im Text"""
-    pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-    emails = re.findall(pattern, text)
-    return list(set(emails))
 
 def extract_phone_numbers(text: str) -> List[str]:
     """Sucht nach Telefonnummern"""
@@ -232,7 +289,9 @@ st.markdown("""
 Diese Web-Anwendung:
 1. Lädt eine PDF-Tabelle von einer URL herunter (alle Seiten werden zusammengeführt)
 2. Filtert und sortiert die Tabelle nach ausgewählten Spalten
-3. Sucht im Web nach Homepages (falls keine URL vorhanden ist)
+3. Sucht **automatisch** nach Homepages:
+   - Zuerst: E-Mail-Adresse → Domain extrahieren (präziseste Methode!)
+   - Dann: Web-Suche mit Namen + Ort (nur .ch Domains)
 4. Extrahiert Praxis-Namen, Mailadressen, Telefon, Dienstleistungen und weitere Details
 5. Exportiert alle gesammelten Informationen als CSV
 """)
@@ -317,6 +376,26 @@ if st.button("PDF laden"):
                     df = pd.DataFrame(fixed_rows, columns=clean_header)
                     df = df.reset_index(drop=True)
 
+                    # Automatisch nach Email-spalten suchen
+                    possible_email_cols = []
+                    possible_url_cols = []
+                    possible_name_cols = []
+                    possible_location_cols = []
+
+                    for col in df.columns:
+                        col_lower = col.lower()
+                        if any(kw in col_lower for kw in ['email', 'mail', 'e-mail', 'e mail']):
+                            possible_email_cols.append(col)
+                        if any(kw in col_lower for kw in ['homepage', 'website', 'url', 'webseite', 'domain']):
+                            possible_url_cols.append(col)
+                        if any(kw in col_lower for kw in ['name', 'praxis', 'arzt', 'mediziner', 'therapeut']):
+                            possible_name_cols.append(col)
+                        if any(kw in col_lower for kw in ['ort', 'stadt', 'standort', 'kanton', 'gemein', 'ort, kanton', 'ort/kanton', 'ort kanton']):
+                            possible_location_cols.append(col)
+
+                    if possible_email_cols:
+                        st.info(f"📧 {len(possible_email_cols)} Spalte(n) mit E-Mail-Inhalten gefunden: {', '.join(possible_email_cols)}")
+
                     st.info(f"ℹ️ Zusammengeführt: {len(df)} Datenzeilen aus {len(all_tables)} Tabellensegmenten")
                 else:
                     labels = [f"Tabelle {t['table_index']} auf Seite {t['page']} ({len(t['data'])-1} Zeilen)" for t in all_tables]
@@ -332,6 +411,10 @@ if st.button("PDF laden"):
 
                 st.session_state['pdf_df'] = df
                 st.session_state['df_columns'] = list(df.columns)
+                st.session_state['possible_email_cols'] = possible_email_cols if 'possible_email_cols' in locals() else []
+                st.session_state['possible_url_cols'] = possible_url_cols if 'possible_url_cols' in locals() else []
+                st.session_state['possible_name_cols'] = possible_name_cols if 'possible_name_cols' in locals() else []
+                st.session_state['possible_location_cols'] = possible_location_cols if 'possible_location_cols' in locals() else []
                 st.session_state['pdf_loaded'] = True
                 st.session_state['sorted'] = False
                 st.session_state['scraped_results'] = None
@@ -461,70 +544,61 @@ if st.session_state.get('pdf_loaded', False):
             key="download_filtered"
         )
 
-# --- SCHRITT 2A: WEBSUCHE FÜR FEHLENDE URLS ---
+# --- SCHRITT 2B: HOMEPAGES AUTOMATISCH FINDEN ---
 if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
-    st.header("Schritt 2a: Homepages im Web suchen (optional)")
+    st.header("Schritt 2b: Homepages automatisch finden 🔍")
 
     available_columns = st.session_state['df_columns']
     work_df = st.session_state['filtered_df'].copy()
 
     st.markdown("""
-    **Wenn deine PDF keine Homepages enthält**, kannst du hier eine Websuche durchführen lassen.
-    Die App sucht nach "Praxisname + Ort" und findet mögliche Websites.
+    **Die App sucht jetzt in dieser Reihenfolge:**
+    1. 📧 **E-Mail-Adressen** → Domain extrahieren (präziseste Methode!)
+    2. 🔗 **Vorhandene URLs** → Direkt verwenden
+    3. 🌐 **Websuche** → Name + Ort (nur .ch Domains)
     """)
 
-    # Testfunktion zur Diagnose
-    with st.expander("🧪 Suchmethode testen (empfohlen vor dem Durchlauf)"):
-        test_query = st.text_input(
-            "Test-Suchbegriff (z. B. Name einer bekannten Praxis):",
-            placeholder="TCM Praxis Zürich",
-            key="test_query"
-        )
-        if st.button("Testen", key="test_search_btn"):
-            if test_query:
-                with st.spinner("Teste Websuche..."):
-                    test_result = search_ddgs_library(test_query)
-                if test_result:
-                    st.success(f"✅ Websuche funktioniert! Testergebnis: {test_result}")
-                else:
-                    st.error("❌ Websuche liefert keine Ergebnisse. "
-                             "Vermutlich blockiert der Server die Anfragen (häufig auf Streamlit Cloud). "
-                             "Lösung: Lokal laufen lassen oder SerpApi verwenden.")
-            else:
-                st.warning("Bitte gib einen Testbegriff ein.")
-
-    col1, col2 = st.columns(2)
+    # Spalten-Zuordnung
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        name_column = st.selectbox(
-            "Spalte mit Praxis/Namen:",
-            available_columns,
-            key="name_col_websearch"
+        email_col = st.selectbox(
+            "E-Mail-Spalte:",
+            ["— Keine —"] + st.session_state.get('possible_email_cols', available_columns),
+            key="email_col"
         )
 
     with col2:
-        location_column = st.selectbox(
-            "Spalte mit Ort/Kanton (optional):",
-            ["— Keine —"] + available_columns,
-            key="location_col_websearch"
+        url_col = st.selectbox(
+            "URL/Homepage-Spalte:",
+            ["— Keine —"] + st.session_state.get('possible_url_cols', available_columns),
+            key="url_col"
         )
 
-    # Zusätzliche Suchbegriffe
-    extra_keywords = st.text_input(
-        "Zusätzliche Suchwörter (optional, z. B. 'Praxis TCM Homepage'):",
-        value="Praxis",
-        key="extra_keywords"
-    )
+    with col3:
+        name_col = st.selectbox(
+            "Name-Spalte:",
+            st.session_state.get('possible_name_cols', available_columns),
+            key="name_col"
+        )
 
-    st.subheader("🔍 Suchmethode wählen")
+    with col4:
+        location_col = st.selectbox(
+            "Ort-Spalte:",
+            ["— Keine —"] + st.session_state.get('possible_location_cols', available_columns),
+            key="location_col"
+        )
+
+    # Websuche Methode
+    st.subheader("🔍 Websuche-Einstellungen (wird nur benutzt, falls keine E-Mail/URL vorhanden)")
 
     search_method = st.radio(
         "Welche Websuche soll verwendet werden?",
         [
-            "DuckDuckGo via ddgs (kostenlos, keine Registrierung)",
-            "SerpApi Google Search (bessere Ergebnisse, braucht API-Key)"
+            "DuckDuckGo via ddgs (kostenlos, .ch-Fokus)",
+            "SerpApi Google Search (besserer Ergebnisse, braucht API-Key)"
         ],
-        key="search_method"
+        key="search_method_step2b"
     )
 
     serapi_key = ""
@@ -534,70 +608,125 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
             type="password",
             help="API-Key unter https://serpapi.com/ erhalten. Kostenlos bis 100 Suchen/Monat."
         )
-        if not serapi_key:
-            st.warning("⚠️ Ohne API-Key funktioniert SerpApi nicht. Alternativ DuckDuckGo wählen.")
 
-    max_websearch_rows = st.slider(
-        "Maximale Anzahl Zeilen websuchen:",
+    # Statistik vor dem Start
+    total_rows = len(work_df)
+    has_email = 0
+    has_url = 0
+    needs_search = 0
+
+    for idx, row in work_df.iterrows():
+        if email_col != "— Keine —":
+            email_val = str(row[email_col]).strip()
+            if email_val and '@' in email_val:
+                has_email += 1
+                continue
+
+        if url_col != "— Keine —":
+            url_val = str(row[url_col]).strip()
+            if url_val and url_val.startswith('http'):
+                has_url += 1
+                continue
+
+        needs_search += 1
+
+    st.info(f"""
+    **Analyse Ihrer Tabelle:**
+    - Zeilen mit E-Mail (direkte Domain): **{has_email}**
+    - Zeilen mit URL (direkt verwendbar): **{has_url}**
+    - Zeilen die Websuche brauchen: **{needs_search}** von **{total_rows}**
+    """)
+
+    max_search_rows = st.slider(
+        "Maximale Anzahl Websuchen (nur Zeilen ohne E-Mail/URL):",
         1,
-        len(work_df),
-        min(len(work_df), 20),
-        key="max_websearch"
+        needs_search,
+        min(needs_search, 20)
     )
 
-    if st.button("Websuche durchführen 🔍"):
+    if st.button("Homepages automatisch finden 🚀"):
         progress_ws = st.progress(0)
         status_ws = st.empty()
+        detail_log = []
 
-        done = 0
-        for idx, row in work_df.head(max_websearch_rows).iterrows():
-            done += 1
-            status_ws.text(f"Suche {done}/{max_websearch_rows}: {row[name_column]}")
+        search_done = 0
 
-            name = str(row[name_column]).strip()
-            location = ""
+        for idx, row in work_df.head(total_rows).iterrows():
+            homepage_found = None
+            method_used = None
 
-            if location_column != "— Keine —":
-                location = str(row[location_column]).strip()
+            # 1. Prüfe E-Mail
+            if email_col != "— Keine —":
+                email_val = str(row[email_col]).strip()
+                if email_val and '@' in email_val:
+                    domain = extract_domain_from_email(email_val)
+                    if domain:
+                        homepage_found = domain
+                        method_used = "E-Mail Domain"
 
-            # Suchbegriff bauen
-            query_parts = [name]
-            if location:
-                query_parts.append(location)
-            if extra_keywords:
-                query_parts.append(extra_keywords)
-            query = " ".join(query_parts)
+            # 2. Prüfe vorhandene URL
+            if not homepage_found and url_col != "— Keine —":
+                url_val = str(row[url_col]).strip()
+                if url_val and url_val.lower().startswith(('http://', 'https://')):
+                    homepage_found = url_val
+                    method_used = "Bestehende URL"
 
-            homepage_url = search_for_homepage(query, search_method, serapi_key)
+            # 3. Websuche
+            if not homepage_found:
+                if search_done >= max_search_rows:
+                    method_used = "Max WebSearch erreicht"
+                else:
+                    name = str(row[name_col]).strip() if name_col != "— Keine —" else ""
+                    location = str(row[location_col]).strip() if location_col != "— Keine —" else ""
 
-            if homepage_url:
-                work_df.at[idx, 'Gesuchte_Homepage'] = homepage_url
+                    query = f"{name}"
+                    if location:
+                        query += f" {location}"
+
+                    homepage_found = search_for_homepage(query, search_method, serapi_key, restrict_to_ch=True)
+                    search_done += 1
+                    method_used = "Websuche"
+
+                    progress_ws.progress(search_done / max_search_rows if max_search_rows > 0 else 1.0)
+
+            # Ergebnis speichern
+            if homepage_found:
+                work_df.at[idx, 'Gefundene_Homepage'] = homepage_found
+                detail_log.append(f"✅ {row[name_col]} → {homepage_found} ({method_used})")
             else:
-                work_df.at[idx, 'Gesuchte_Homepage'] = "Nicht gefunden"
+                work_df.at[idx, 'Gefundene_Homepage'] = "Nicht gefunden"
+                detail_log.append(f"❌ {row[name_col]} → Nicht gefunden")
 
-            progress_ws.progress(done / max_websearch_rows)
-            time.sleep(2)  # Rate limiting
+            status_ws.text(f"Bearbeitet {idx+1}/{total_rows} | Websuche {search_done}/{max_search_rows}")
+            time.sleep(0.5)  # Rate limiting für Websuche
 
-        status_ws.text("Websuche abgeschlossen! ✅")
+        status_ws.text("Abgeschlossen! ✅")
 
-        # Spalte ans Ende sortieren
-        cols = [c for c in work_df.columns if c != 'Gesuchte_Homepage'] + ['Gesuchte_Homepage']
+        # Spalte ans Ende
+        cols = [c for c in work_df.columns if c != 'Gefundene_Homepage'] + ['Gefundene_Homepage']
         work_df = work_df[cols]
 
         st.session_state['filtered_df'] = work_df
         st.session_state['websuche_completed'] = True
 
-        found_count = (work_df['Gesuchte_Homepage'] != 'Nicht gefunden').sum()
-        st.info(f"✅ {found_count} von {max_websearch_rows} Homepages gefunden.")
+        found_count = (work_df['Gefundene_Homepage'] != 'Nicht gefunden').sum()
+        st.info(f"✅ {found_count} von {total_rows} Homepages gefunden ({search_done} Websuchen durchgeführt)")
 
-        st.subheader("Ergebnisse der Websuche")
-        show_cols = [name_column, 'Gesuchte_Homepage']
-        if location_column != "— Keine —":
-            show_cols.insert(1, location_column)
+        # Detail-Log zeigen
+        with st.expander("📋 Detail-Protokoll ansehen"):
+            for log_line in detail_log[:20]:
+                st.text(log_line)
+            if len(detail_log) > 20:
+                st.caption(f"... weitere {len(detail_log) - 20} Einträge")
+
+        st.subheader("Ergebnisse")
+        show_cols = [name_col, 'Gefundene_Homepage']
+        if location_col != "— Keine —":
+            show_cols.insert(1, location_col)
         st.dataframe(work_df[show_cols], use_container_width=True)
 
     if st.session_state.get('websuche_completed'):
-        st.info("💾 Die Tabelle enthält jetzt die Spalte 'Gesuchte_Homepage'. Weiter mit Schritt 3!")
+        st.info("💾 Die Tabelle enthält jetzt die Spalte 'Gefundene_Homepage'. Weiter mit Schritt 3!")
 
 # --- SCHRITT 3: HOMEPAGE EXTRACTION ---
 if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
