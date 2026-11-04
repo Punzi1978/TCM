@@ -35,16 +35,51 @@ GENERAL_EMAIL_PROVIDERS = [
 
     # Internationale Provider
     'gmail.com', 'googlemail.com',
-    'hotmail.com', 'hotmail.de', 'hotmail.fr', 'hotmail.co.uk',
+    'hotmail.com', 'hotmail.de', 'hotmail.fr', 'hotmail.co.uk', 'hotmai.fr',
     'outlook.com', 'outlook.de', 'outlook.fr', 'outlook.co.uk', 'live.com', 'msn.com',
     'yahoo.com', 'yahoo.de', 'yahoo.fr', 'yahoo.co.uk', 'ymail.com',
     'icloud.com', 'me.com', 'mac.com',
     'protonmail.ch', 'protonmail.com', 'proton.me',
     'web.de', 'freenet.de',
     't-online.de',
-    'aol.com', 'aol.de',
+    'aol.com', 'aol.de', 'aol.fr',
     'mail.com', 'email.com',
-    'zoho.com', 'yandex.com', 'fastmail.com'
+    'zoho.com', 'yandex.com', 'yandex.ru', 'fastmail.com',
+
+    # Französische Provider (leiten zu Portalen weiter!)
+    'wanadoo.fr', 'orange.fr', 'wanadoo.com',
+    'laposte.net', 'sfr.fr', 'neuf.fr', 'cegetel.fr',
+    'free.fr', 'bbox.fr', 'bouygtelecom.fr',
+
+    # Weitere europäische Provider
+    'libero.it', 'virgilio.it', 'alice.it', 'tin.it',
+    'tiscali.it', 'tiscali.ch', 'tiscalinet.ch',
+    'telefonica.net', 'terra.es', 'terra.com.br',
+    'ziggo.nl', 'kpnmail.nl', 'planet.nl', 'telfort.nl',
+    'online.no', 'telia.com', 'telia.no',
+    'seznam.cz', 'atlas.cz',
+    'gmx.at', 'chello.at', 'aon.at',
+    'besenova.sk'
+]
+
+# Portal-/Weiterleitungs-Domains, die in Suchergebnissen NICHT als Homepage gelten dürfen
+PORTAL_REDIRECT_DOMAINS = [
+    'orange.fr', 'wanadoo.fr',
+    'gmx.ch', 'gmx.net', 'gmx.com', 'gmx.li',
+    'bluewin.ch',
+    'gmail.com', 'googlemail.com',
+    'hotmail.com', 'hotmail.fr',
+    'outlook.com', 'live.com', 'msn.com',
+    'yahoo.com', 'yahoo.fr', 'yahoo.de',
+    'icloud.com', 'me.com',
+    'web.de', 'freenet.de', 't-online.de',
+    'google.com', 'google.ch',
+    'bing.com',
+    'facebook.com', 'instagram.com', 'linkedin.com',
+    'wikipedia.org',
+    'aol.com', 'aol.de', 'aol.fr',
+    'orange.com',
+    'portal.ch', 'login.ch', 'account.ch'
 ]
 
 def is_general_provider(domain: str) -> bool:
@@ -52,11 +87,18 @@ def is_general_provider(domain: str) -> bool:
     domain = domain.lower().strip()
     return domain in GENERAL_EMAIL_PROVIDERS
 
+def is_portal_domain(domain: str) -> bool:
+    """Prüft ob eine Domain ein bekanntes Portal/eine Weiterleitungsseite ist"""
+    domain = domain.lower().strip()
+    # WWW-Präfix entfernen für den Vergleich
+    domain_clean = domain.replace('www.', '')
+    return domain_clean in PORTAL_REDIRECT_DOMAINS or domain in PORTAL_REDIRECT_DOMAINS
+
 def extract_domain_from_email(email: str) -> Optional[str]:
     """
     Extrahiert die Domain aus einer E-Mail-Adresse und baut eine plausible Homepage
     Beispiel: info@tcm-praxis.ch → https://tcm-praxis.ch
-    ABER: Bei allgemeinen Providern (gmx.ch, bluewin.ch, gmail.com) zurückgeben None
+    ABER: Bei allgemeinen Providern (gmx.ch, bluewin.ch, gmail.com, wanadoo.fr) zurückgeben None
 
     WICHTIG: Nur echte E-Mail-Provider sind in GENERAL_EMAIL_PROVIDERS gelistet.
     Praxis-Domains wie chinamedizin.net, tcm.ch, etc. werden AKZEPTIERT!
@@ -72,6 +114,10 @@ def extract_domain_from_email(email: str) -> Optional[str]:
             return None
 
         if is_general_provider(domain):
+            return None
+
+        # Zusätzlich gegen Portal-Liste prüfen (doppelte Sicherheit)
+        if is_portal_domain(domain):
             return None
 
         homepage = f"https://{domain}"
@@ -107,7 +153,8 @@ def search_ddgs_library(query: str, restrict_to_ch: bool = True) -> Optional[str
                         'wikipedia.org', 'doctorfmh.ch', 'reddit.com', 'tripadvisor.com',
                         'buch.ch', 'jameda.de', 'docdirekt.ch', 'gmx.ch', 'bluewin.ch',
                         'gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com',
-                        'praxisfinder.ch', 'therapeuten.ch', 'medizinportal.ch']
+                        'praxisfinder.ch', 'therapeuten.ch', 'medizinportal.ch',
+                        'wanadoo.fr', 'orange.fr', 'gmail.com', 'google.com']
 
     try:
         with DDGS() as ddgs:
@@ -125,7 +172,12 @@ def search_ddgs_library(query: str, restrict_to_ch: bool = True) -> Optional[str
             domain = urlparse(link).netloc.lower()
             title = (res.get('title', '') or res.get('headline', '')).lower()
 
+            # Ausgeschlossene Domains überspringen (inkl. Portal-Domains!)
             if any(excl in domain for excl in excluded_domains):
+                continue
+
+            # Portal-/Weiterleitungs-Domains überspringen (z. B. orange.fr, gmx.ch)
+            if is_portal_domain(domain):
                 continue
 
             if '.ch' in domain:
@@ -166,13 +218,18 @@ def search_serpapi(query: str, api_key: str, restrict_to_ch: bool = True) -> Opt
 
         excluded_domains = ['local.ch', 'search.ch', 'facebook.com', 'linkedin.com',
                             'wikipedia.org', 'doctorfmh.ch', 'tripadvisor.com', 'jameda.de',
-                            'praxisfinder.ch', 'therapeuten.ch']
+                            'praxisfinder.ch', 'therapeuten.ch',
+                            'wanadoo.fr', 'orange.fr', 'google.com', 'gmx.ch']
 
         for res in data.get('organic_results', []):
             link = res.get('link', '')
             domain = urlparse(link).netloc.lower()
 
             if any(excl in domain for excl in excluded_domains):
+                continue
+
+            # Portal-Domains auch hier ausschließen
+            if is_portal_domain(domain):
                 continue
 
             if '.ch' in domain:
@@ -649,7 +706,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     - Name (aus Name-Spalte) + Ort (aus Ort-Spalte) + **Filter 1-Eintrag**
     - Beispiel: "Dr. Müller Zürich TCM schweiz praxis"
     - Nur .ch Domains werden berücksichtigt
-    - Verzeichnisse (Local.ch, Search.ch, Praxisfinder) werden ignoriert
+    - Verzeichnisse und Portale (Local.ch, Search.ch, Praxisfinder, orange.fr, gmx.ch etc.) werden ignoriert
     """)
 
     search_method = st.radio(
@@ -683,7 +740,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
                 if domain:
                     has_practice_email += 1
                     continue
-                elif is_general_provider(email_val.split('@')[1]):
+                else:
                     has_generic_email += 1
                     continue
 
@@ -698,7 +755,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     st.info(f"""
     **Analyse Ihrer Tabelle:**
     - Zeilen mit Praxis-E-Mail (direkte Domain): **{has_practice_email}**
-    - Zeilen mit allgemeiner E-Mail (gmx/bluewin → Websuche): **{has_generic_email}**
+    - Zeilen mit allgemeiner E-Mail (gmx/bluewin/wanadoo → Websuche): **{has_generic_email}**
     - Zeilen mit URL (direkt verwendbar): **{has_url}**
     - Zeilen die Websuche brauchen: **{needs_search}** von **{total_rows}**
     """)
@@ -725,7 +782,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
             method_used = None
             query = ""
 
-            # 1. Prüfe E-Mail (nur Praxis-Domains)
+            # 1. Prüfe E-Mail (nur Praxis-Domains, KEINE Provider wie wanadoo.fr!)
             if email_col != "— Keine —":
                 email_val = str(row[email_col]).strip()
                 if email_val and '@' in email_val:
@@ -738,10 +795,13 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
             if not homepage_found and url_col != "— Keine —":
                 url_val = str(row[url_col]).strip()
                 if url_val and url_val.lower().startswith(('http://', 'https://')):
-                    homepage_found = url_val
-                    method_used = "Bestehende URL"
+                    # Portal-Domains aus bestehenden URLs auch nicht akzeptieren
+                    url_domain = urlparse(url_val).netloc.lower()
+                    if not is_portal_domain(url_domain):
+                        homepage_found = url_val
+                        method_used = "Bestehende URL"
 
-            # 3. Websuche (auch bei allgemeinen Emails wie gmx.ch)
+            # 3. Websuche (auch bei allgemeinen Emails wie gmx.ch / wanadoo.fr)
             if not homepage_found:
                 if search_done >= max_search_rows:
                     method_used = "Max WebSearch erreicht"
