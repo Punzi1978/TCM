@@ -3,7 +3,7 @@ PDF Tabellenscraper - Web Application
 Diese Anwendung lädt PDF-Tabellen herunter, filtert/sortiert sie und extrahiert Informationen von verlinkten Websites.
 
 Installation:
-pip install streamlit pandas pdfplumber requests beautifulsoup4 lxml
+pip install streamlit pandas pdfplumber requests beautifulsoup4 lxml ddgs
 
 Anwendung starten:
 streamlit run app.py
@@ -29,44 +29,37 @@ def search_for_homepage(query: str, method: str, serpapi_key: str = "") -> Optio
     """Sucht im Web nach einer Homepage basierend auf dem Suchbegriff"""
     try:
         if "DuckDuckGo" in method:
-            return search_duckduckgo(query)
+            return search_ddgs_library(query)
         else:
             return search_serpapi(query, serpapi_key)
     except Exception:
         return None
 
-def search_duckduckgo(query: str) -> Optional[str]:
-    """Nutzt DuckDuckGo HTML-Suche (einfach, kostenlos)"""
-    url = f"https://html.duckduckgo.com/html/?q={quote(query)}"
+def search_ddgs_library(query: str) -> Optional[str]:
+    """
+    Nutzt die ddgs-Bibliothek (zuverlässiger als direktes HTML-Scraping)
+    """
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            return None
 
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
+    excluded_domains = ['local.ch', 'search.ch', 'yellow.local.ch', 'facebook.com',
+                        'linkedin.com', 'twitter.com', 'instagram.com', 'youtube.com',
+                        'wikipedia.org', 'doctorfmh.ch', 'reddit.com']
 
     try:
-        response = requests.post(url, data={'q': query}, headers=headers, timeout=15)
-        response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, 'lxml')
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=10))
 
-        results = soup.select('a.result__a')
-
-        if results:
-            first_link = results[0].get('href', '')
-
-            # DuckDuckGo leitet manchmal über uddg= Parameter weiter
-            if 'uddg=' in first_link:
-                parsed = up.parse_qs(up.urlparse(first_link).query)
-                if 'uddg' in parsed:
-                    first_link = parsed['uddg'][0]
-
-            # Verzeichnisse ausschließen
-            excluded_domains = ['local.ch', 'search.ch', 'yellow.local.ch', 'facebook.com',
-                                'linkedin.com', 'twitter.com', 'instagram.com', 'youtube.com',
-                                'wikipedia.org', 'doctorfmh.ch']
-
-            domain = urlparse(first_link).netloc.lower()
+        for res in results:
+            link = res.get('href', '') or res.get('link', '')
+            domain = urlparse(link).netloc.lower()
             if domain and not any(excl in domain for excl in excluded_domains):
-                return first_link
+                return link
 
         return None
     except Exception:
@@ -480,6 +473,26 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     Die App sucht nach "Praxisname + Ort" und findet mögliche Websites.
     """)
 
+    # Testfunktion zur Diagnose
+    with st.expander("🧪 Suchmethode testen (empfohlen vor dem Durchlauf)"):
+        test_query = st.text_input(
+            "Test-Suchbegriff (z. B. Name einer bekannten Praxis):",
+            placeholder="TCM Praxis Zürich",
+            key="test_query"
+        )
+        if st.button("Testen", key="test_search_btn"):
+            if test_query:
+                with st.spinner("Teste Websuche..."):
+                    test_result = search_ddgs_library(test_query)
+                if test_result:
+                    st.success(f"✅ Websuche funktioniert! Testergebnis: {test_result}")
+                else:
+                    st.error("❌ Websuche liefert keine Ergebnisse. "
+                             "Vermutlich blockiert der Server die Anfragen (häufig auf Streamlit Cloud). "
+                             "Lösung: Lokal laufen lassen oder SerpApi verwenden.")
+            else:
+                st.warning("Bitte gib einen Testbegriff ein.")
+
     col1, col2 = st.columns(2)
 
     with col1:
@@ -496,13 +509,19 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
             key="location_col_websearch"
         )
 
-    # API-Auswahl
+    # Zusätzliche Suchbegriffe
+    extra_keywords = st.text_input(
+        "Zusätzliche Suchwörter (optional, z. B. 'Praxis TCM Homepage'):",
+        value="Praxis",
+        key="extra_keywords"
+    )
+
     st.subheader("🔍 Suchmethode wählen")
 
     search_method = st.radio(
         "Welche Websuche soll verwendet werden?",
         [
-            "DuckDuckGo (kostenlos, keine Registrierung)",
+            "DuckDuckGo via ddgs (kostenlos, keine Registrierung)",
             "SerpApi Google Search (bessere Ergebnisse, braucht API-Key)"
         ],
         key="search_method"
@@ -542,9 +561,12 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
                 location = str(row[location_column]).strip()
 
             # Suchbegriff bauen
-            query = f"{name}"
+            query_parts = [name]
             if location:
-                query += f" {location}"
+                query_parts.append(location)
+            if extra_keywords:
+                query_parts.append(extra_keywords)
+            query = " ".join(query_parts)
 
             homepage_url = search_for_homepage(query, search_method, serapi_key)
 
@@ -566,10 +588,13 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
         st.session_state['websuche_completed'] = True
 
         found_count = (work_df['Gesuchte_Homepage'] != 'Nicht gefunden').sum()
-        st.info(f"✅ {found_count} von {len(work_df)} Homepages gefunden.")
+        st.info(f"✅ {found_count} von {max_websearch_rows} Homepages gefunden.")
 
         st.subheader("Ergebnisse der Websuche")
-        st.dataframe(work_df[[name_column] + (['Gesuchte_Homepage'] if 'Gesuchte_Homepage' in work_df.columns else [])], use_container_width=True)
+        show_cols = [name_column, 'Gesuchte_Homepage']
+        if location_column != "— Keine —":
+            show_cols.insert(1, location_column)
+        st.dataframe(work_df[show_cols], use_container_width=True)
 
     if st.session_state.get('websuche_completed'):
         st.info("💾 Die Tabelle enthält jetzt die Spalte 'Gesuchte_Homepage'. Weiter mit Schritt 3!")
