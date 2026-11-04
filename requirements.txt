@@ -4,3 +4,4 @@ pdfplumber
 requests
 beautifulsoup4
 lxml
+ddgs
