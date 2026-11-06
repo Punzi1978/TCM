@@ -52,6 +52,62 @@ PORTAL_REDIRECT_DOMAINS = [
     'portal.ch', 'login.ch', 'account.ch'
 ]
 
+# Kanonische Therapie-Begriffe: Erkennungsmuster -> sauberer Ausgabe-Name
+# (Regex-Muster klein geschrieben; Ausgabe so, wie sie in der Tabelle stehen soll)
+THERAPY_TERMS = [
+    (r'traditionelle\s+chinesische\s+medizin|\btcm\b', 'Traditionelle Chinesische Medizin (TCM)'),
+    (r'akupunktur', 'Akupunktur'),
+    (r'tuina', 'Tuina-Massage'),
+    (r'shiatsu', 'Shiatsu'),
+    (r'moxibustion|moxa-behandlung|\bmoxa\b', 'Moxibustion (Moxa)'),
+    (r'schröpfglas|schröpfen|schröpfglas', 'Schröpfen'),
+    (r'kräuterkunde|kräutertherapie|chinesische\s+kräuter|phytotherapie', 'Kräutertherapie / Phytotherapie'),
+    (r'ernährungsberatung|ernährungslehre|diätetik', 'Ernährungsberatung / Diätetik'),
+    (r'fünf\s+elemente|5\s+elemente|fünf\s+transformationen', 'Fünf-Elemente-Lehre'),
+    (r'qi\s+gong', 'Qi Gong'),
+    (r'tai\s+chi|taiji', 'Tai Chi'),
+    (r'meditation|achtsamkeit', 'Meditation / Achtsamkeit'),
+    (r'massage', 'Massage'),
+    (r'fußreflexzonen|fussreflexzonen', 'Fußreflexzonenmassage'),
+    (r'reflexzonen', 'Reflexzonentherapie'),
+    (r'chiropraktik|chiropraktik', 'Chiropraktik'),
+    (r'osteopathie', 'Osteopathie'),
+    (r'physiotherapie', 'Physiotherapie'),
+    (r'manuelle\s+therapie', 'Manuelle Therapie'),
+    (r'aromatherapie|ätherische\s+öle', 'Aromatherapie'),
+    (r'homöopathie', 'Homöopathie'),
+    (r'naturheilkunde|naturheilverfahren', 'Naturheilkunde'),
+    (r'cupping', 'Cupping'),
+    (r'guasha|gua\s+sha', 'Gua Sha'),
+    (r'qigong', 'Qi Gong'),
+    (r'meridian', 'Meridian-Therapie'),
+    (r'energiearbeit', 'Energiearbeit'),
+    (r'意向führungs|hypnose', 'Hypnose'),
+    (r'autogenes\s+training', 'Autogenes Training'),
+    (r'progressive\s+muskels?entspannung|progressive\s+relaxation', 'Progressive Muskelentspannung'),
+    (r'yoga', 'Yoga'),
+    (r'pilates', 'Pilates'),
+    (r'wickel|auflagen', 'Wickel & Auflagen'),
+    (r'blutegel', 'Blutegeltherapie'),
+    (r'earcandle|ohrenkerze|ohrenkerzen', 'Ohrenkerzen-Behandlung'),
+    (r'kopfhautmassage|kopfmassage', 'Kopfmassage'),
+    (r'firmenmassage|busines massage|büromassage', 'Firmenmassage'),
+    (r'baby(qi gong)?massage|babymassage', 'Babymassage'),
+    (r'pönkt|penkt|wirbelsäulen', 'Wirbelsäulentherapie'),
+    (r'dorn-therapie|dorntherapie|dorn-methode', 'Dorn-Therapie'),
+    (r'breuss', 'Breuss-Massage'),
+    (r'grave|gravida|schwangeren(yoga|qigong|massage)?', 'Angebote für Schwangere'),
+    (r'burn-?out|burnout|stressmanagement|stressbewältigung', 'Stressmanagement / Burnout-Begleitung'),
+    (r'schlafstörungen', 'Begleitung bei Schlafstörungen'),
+    (r'migräne', 'Behandlung von Migräne'),
+    (r'allergien?', 'Behandlung von Allergien'),
+    (r'verdauungs(störungen)?', 'Behandlung von Verdauungsstörungen'),
+    (r'rücken(schmerzen)?', 'Behandlung von Rückenschmerzen'),
+    (r'gelenks?schmerzen|arthrose', 'Behandlung von Gelenkschmerzen'),
+    (r'sportverletzungen?|sporttherapie', 'Sportverletzungen / Sporttherapie'),
+    (r'puerperal|wochenbett', 'Wochenbettbegleitung'),
+]
+
 def is_general_provider(domain: str) -> bool:
     domain = domain.lower().strip()
     return domain in GENERAL_EMAIL_PROVIDERS
@@ -196,10 +252,11 @@ def extract_site_information(url: str, info_types: List[str]) -> Dict[str, Optio
         if 'Dienstleistungen' in info_types:
             services = extract_services(soup)
             result['Dienstleistungen'] = '; '.join(services) if services else 'Keine gefunden'
-            result['Anzahl_Dienstleistungen'] = str(len(services)) if services else '0'
+            result['Anzahl_Dienstleistungen'] = len(services) if services else 0
 
     except requests.exceptions.RequestException as e:
-        result['Error'] = f"HTTP Error: {str(e)}"
+        result['Dienstleistungen'] = 'Keine gefunden'
+        result['Anzahl_Dienstleistungen'] = 0
     return result
 
 def extract_phone_numbers(text: str) -> List[str]:
@@ -231,10 +288,36 @@ def extract_about_section(soup: BeautifulSoup) -> str:
             return text
     return ''
 
+def _looks_complete(item: str) -> bool:
+    """Prüft, ob ein Eintrag wie ein vollständiger (nicht abgeschnittener) Text aussieht."""
+    item = item.strip()
+    # Verwirft Items, die mit Komma, Semikolon oder Bindestrich enden (typisch für Abbrüche)
+    if item.endswith((',', ';', '-', '/', ':')):
+        return False
+    # Verwirft Items mit nur 1-2 Buchstaben
+    letters = re.sub(r'[^a-zA-ZäöüÄÖÜéèêàâ]', '', item)
+    if len(letters) < 3:
+        return False
+    # Verwirft Items mit unverhältnismäßig vielen Sonderzeichen
+    special = len(re.sub(r'[a-zA-ZäöüÄÖÜéèêàâ0-9\s]', '', item))
+    if special > len(item) * 0.3:
+        return False
+    return True
+
+def _match_therapy_terms(text: str) -> List[str]:
+    """Erkennt bekannte Therapie-Begriffe im Text und gibt saubere, kanonische Namen zurück."""
+    text_lower = text.lower()
+    found = []
+    for pattern, canonical in THERAPY_TERMS:
+        if re.search(pattern, text_lower):
+            if canonical not in found:
+                found.append(canonical)
+    return found
+
 def extract_services(soup: BeautifulSoup) -> List[str]:
     """
     SUCHT NACH THERAPIEN/BEHANDLUNGEN auf der Website.
-    Kombiniert mehrere Strategien: Listen, Überschriften, Text-Keywords.
+    Priorität: Kanonische Begriffe aus THERAPY_TERMS statt abgehackter Fragmente.
     """
     services = []
 
@@ -244,81 +327,69 @@ def extract_services(soup: BeautifulSoup) -> List[str]:
             return ''
         junk = ['cookie', 'datenschutz', 'impressum', 'login', 'anmelden', 'mehr erfahren',
                 'weiterlesen', 'menu', 'navigation', 'home', 'kontakt aufnehmen',
-                'allgemeine geschäftsbedingungen', ' AGB', 'haftung', 'urheberrecht']
+                'allgemeine geschäftsbedingungen', 'agb', 'haftung', 'urheberrecht']
         if text.lower() in junk:
             return ''
         return text
 
-    # === STRATEGIE 1: Explizite Überschriften wie "Unsere Therapien", "Behandlungen", etc. ===
-    therapy_headings = [
-        'therapi', 'behandlung', 'leistung', 'angebot', 'service', 'methode',
-        'schwerpunkt', 'indikation', 'spezial', 'angebotene therapie', 'unsere leistungen',
-        'behandlungsangebot', 'behandlungsformen', 'therapieangebot', 'kursoverzicht',
-        'kurse', 'kursangebot', 'massag', 'akupunktur', 'tuina', 'shiatsu'
-    ]
+    therapy_headings = ['therapi', 'behandlung', 'leistung', 'angebot', 'service',
+                        'methode', 'schwerpunkt', 'indikation', 'behandlungsangebot',
+                        'behandlungsformen', 'therapieangebot', 'kurse', 'kursangebot']
 
+    # === STRATEGIE 1: Überschriften wie "Unsere Therapien" → Inhalte darunter ===
     for heading in soup.find_all(['h2', 'h3', 'h4']):
         heading_text = heading.get_text().lower()
         if any(pat in heading_text for pat in therapy_headings):
-            # Direkte Kinder dieser Überschrift als Services interpretieren
             for sibling in heading.next_siblings:
                 if hasattr(sibling, 'name') and sibling.name in ['ul', 'ol']:
                     for li in sibling.find_all('li'):
                         item = clean(li.get_text(strip=True))
-                        if item and 3 < len(item) < 150:
+                        if item and _looks_complete(item) and 3 < len(item) < 150:
                             if item.lower() not in [s.lower() for s in services]:
                                 services.append(item)
                     break
                 elif hasattr(sibling, 'name') and sibling.name in ['p', 'div']:
                     text = clean(sibling.get_text(strip=True))
-                    if text and len(text) < 200:
+                    if text and len(text) < 300 and _looks_complete(text):
                         if text.lower() not in [s.lower() for s in services]:
                             services.append(text)
                     break
 
     # === STRATEGIE 2: Container mit passenden Klassen ===
     for container in soup.find_all(['section', 'div'],
-                                   class_=re.compile(r'(leistung|behandlung|angebot|service|therapie|methode|schwerpunkt|indikation|behandlung)', re.I)):
+                                   class_=re.compile(r'(leistung|behandlung|angebot|service|therapie|methode|schwerpunkt|indikation)', re.I)):
         for li in container.find_all('li'):
             item = clean(li.get_text(strip=True))
-            if item and 3 < len(item) < 150 and item.lower() not in [s.lower() for s in services]:
+            if item and _looks_complete(item) and 3 < len(item) < 150 and item.lower() not in [s.lower() for s in services]:
                 services.append(item)
 
         for heading in container.find_all(['h3', 'h4']):
             item = clean(heading.get_text(strip=True))
-            if item and 3 < len(item) < 80 and item.lower() not in [s.lower() for s in services]:
+            if item and _looks_complete(item) and 3 < len(item) < 80 and item.lower() not in [s.lower() for s in services]:
                 services.append(item)
 
-    # === STRATEGIE 3: Keyword-basierte Suche im gesamten Text ===
-    # Finde Text-Fragmente mit Therapie-Keywords
-    therapy_keywords = [
-        'akupunktur', 'tuina', 'shiatsu', 'moxa', 'moxibustion', 'schröpfen', 'schröpfglas',
-        'kräuter', 'kräuterkunde', 'phytotherapie', 'ernährung', 'ernährungsberatung',
-        'qi gong', 'tai chi', 'meditation', 'entspannung', 'massage', 'reflexzonen',
-        'fußreflexzonen', 'chiropraktik', 'osteopathie', 'physiotherapie', 'manuelle therapie',
-        'traditionelle chinesische medizin', 'tcm', 'chinesische heilkunde',
-        'diätetik', 'fünf elemente', 'fünf transformationen', 'meridian', 'energiearbeit',
-        'aromatherapie', 'homöopathie', 'naturheilverfahren', 'Naturheilkunde'
-    ]
+    # === STRATEGIE 3: Ganzseitige Textanalyse mit kanonischen Begriffen ===
+    # Statt Fragmente zu schneiden, werden ganze Absätze/Sätze gelesen und die
+    # ERKANNTEN Therapien als sauberer, kanonischer Name zurückgegeben.
+    page_text = soup.get_text(separator=' ', strip=True)
+    detected_terms = _match_therapy_terms(page_text)
+    for term in detected_terms:
+        if term.lower() not in [s.lower() for s in services]:
+            services.append(term)
 
-    paragraphs = soup.find_all('p')
-    for p in paragraphs:
+    # Zusätzlich: Ganze Sätze mit Therapie-Erwähnungen (lesbar, nicht abgeschnitten)
+    for p in soup.find_all('p'):
         text = p.get_text(strip=True)
-        if len(text) > 30 and len(text) < 500:
-            for keyword in therapy_keywords:
-                if keyword.lower() in text.lower():
-                    # Extract kurze Phrase um das Keyword herum
-                    idx = text.lower().find(keyword.lower())
-                    if idx >= 0:
-                        start = max(0, idx - 20)
-                        end = min(len(text), idx + len(keyword) + 30)
-                        phrase = text[start:end].strip()
-                        cleaned_phrase = clean(phrase)
-                        if cleaned_phrase and cleaned_phrase.lower() not in [s.lower() for s in services]:
-                            services.append(cleaned_phrase)
-                        break
+        if 30 < len(text) < 400:
+            # Satzweise zerlegen (nie mitten im Satz abschneiden!)
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if 20 < len(sentence) < 250 and _match_therapy_terms(sentence):
+                    if _looks_complete(sentence) and sentence.lower() not in [s.lower() for s in services]:
+                        services.append(sentence)
 
-    # === STRATEGIE 4: Bullet-Listen mit kurzen Items (typisch für Service-Übersichten) ===
+    # === STRATEGIE 4: Service-Listen (kurze Bullet-Items) ===
     for lst in soup.find_all(['ul', 'ol']):
         count = len(lst.find_all('li'))
         if 3 <= count <= 30:
@@ -327,9 +398,8 @@ def extract_services(soup: BeautifulSoup) -> List[str]:
             if has_therapy_class:
                 for li in lst.find_all('li'):
                     item = clean(li.get_text(strip=True))
-                    if item and 3 < len(item) < 100:
-                        if item.lower() not in [s.lower() for s in services]:
-                            services.append(item)
+                    if item and _looks_complete(item) and 3 < len(item) < 100 and item.lower() not in [s.lower() for s in services]:
+                        services.append(item)
 
     # Deduplizieren und auf 30 begrenzen
     unique = []
@@ -352,9 +422,7 @@ st.markdown("""
 Diese Web-Anwendung:
 1. Lädt eine PDF-Tabelle von einer URL herunter (alle Seiten werden zusammengeführt)
 2. Filtert und sortiert die Tabelle nach ausgewählten Spalten
-3. Sucht **automatisch** nach Homepages:
-   - Zuerst: E-Mail-Adresse → Domain extrahieren (nur bei echten Praxis-Domains!)
-   - Dann: Web-Suche mit Namen + Ort + Filter 1 (nur .ch Domains)
+3. Sucht **automatisch** nach Homepages (E-Mail-Domain → URL → Websuche)
 4. Extrahiert **Therapien/Behandlungen** von den gefundenen Homepages
 5. Exportiert alle gesammelten Informationen als CSV
 """)
@@ -743,7 +811,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     if st.session_state.get('websuche_completed'):
         st.info("💾 Die Tabelle enthält jetzt die Spalte 'Gefundene_Homepage'. Weiter mit Schritt 3!")
 
-# --- SCHRITT 3: DIENSTLEISTUNGEN UND INFORMATIONEN EXTRAHIEREN ---
+# --- SCHRITT 3: THERAPIEN UND INFORMATIONEN EXTRAHIEREN ---
 if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     st.header("Schritt 3: Therapien & Angebote von Homepages extrahieren 🏥")
 
@@ -753,13 +821,13 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     st.markdown("""
     Die App besucht jede Homepage und extrahiert **Therapien/Behandlungen** (z. B. Akupunktur, Tuina, Kräutertherapie)
     sowie optional Mailadresse, Telefon und andere Kontaktdaten.
-    Das Ergebnis erscheint in einer Tabelle mit **Name, Vorname** und den gefundenen Informationen.
+    Das Ergebnis erscheint in einer Tabelle mit **Name, Vorname** und den gefundenen Therapien.
     """)
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        homepage_options = ["— Keine —"] + [c for c in available_columns if 'homepage' in c.lower() or 'Gefundene_Homepage' in c]
+        homepage_options = ["— Keine —"] + [c for c in available_columns if 'homepage' in c.lower()]
         homepage_default = 1 if len(homepage_options) > 1 else 0
         homepage_col = st.selectbox("Spalte mit Homepage-URL:", homepage_options, index=homepage_default, key="homepage_col_extract")
 
@@ -816,21 +884,33 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
                     extracted_info = extract_site_information(homepage_value, info_columns + ['Dienstleistungen'])
                     results.append({**base, **{homepage_col: row[homepage_col]}, **extracted_info})
                 else:
-                    results.append({**base, homepage_col: row[homepage_col], 'Error': 'Keine gültige Homepage-URL vorhanden'})
-            except Exception as e:
-                results.append({**base, homepage_col: row[homepage_col], 'Error': str(e)})
+                    results.append({**base, homepage_col: row[homepage_col],
+                                    'Dienstleistungen': 'Keine Homepage vorhanden',
+                                    'Anzahl_Dienstleistungen': 0})
+            except Exception:
+                results.append({**base, homepage_col: row[homepage_col],
+                                'Dienstleistungen': 'Fehler beim Abruf',
+                                'Anzahl_Dienstleistungen': 0})
 
             progress_bar.progress(processed / max_rows)
             time.sleep(1)
 
         status_text.text("Fertig! ✅")
         results_df = pd.DataFrame(results)
-        st.session_state['scraped_results_df'] = results_df
 
+        # Error-Spalte entfernen (soll nicht in der Ausgabe erscheinen)
+        if 'Error' in results_df.columns:
+            results_df = results_df.drop(columns=['Error'])
+
+        st.session_state['scraped_results_df'] = results_df
         st.success(f"✅ {len(results_df)} Praxen bearbeitet")
 
     if st.session_state.get('scraped_results_df') is not None:
-        results_df = st.session_state['scraped_results_df']
+        results_df = st.session_state['scraped_results_df'].copy()
+
+        # Sicherheitshalber Error-Spalte auch hier entfernen
+        if 'Error' in results_df.columns:
+            results_df = results_df.drop(columns=['Error'])
 
         st.subheader("📊 Ergebnistabelle")
         st.dataframe(results_df, use_container_width=True)
@@ -845,13 +925,14 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
         )
 
         if 'Dienstleistungen' in results_df.columns:
-            found = (results_df['Dienstleistungen'] != 'Keine gefunden').sum()
+            found_mask = (~results_df['Dienstleistungen'].isin(['Keine gefunden', 'Keine Homepage vorhanden', 'Fehler beim Abruf']))
+            found = found_mask.sum()
             st.caption(f"📈 Bei **{found} von {len(results_df)}** Praxen wurden Therapien gefunden.")
 
         if 'Anzahl_Dienstleistungen' in results_df.columns:
-            total_services = sum(int(x) if x.isdigit() else 0 for x in results_df['Anzahl_Dienstleistungen'])
+            total_services = sum(int(str(x)) if str(x).isdigit() else 0 for x in results_df['Anzahl_Dienstleistungen'])
             avg_services = round(total_services / len(results_df), 1) if len(results_df) > 0 else 0
-            st.caption(f"➡️ Insgesamt **{total_services}** Therapien extrahiert | Durchschnittlich **{avg_services}** pro Praxis")
+            st.caption(f"➡️ Insgesamt **{total_services}** Therapien erkannt | Durchschnittlich **{avg_services}** pro Praxis")
 
 st.markdown("---")
 st.caption("⚠️ **Rechtlicher Hinweis**: Respektiere die robots.txt der Zielseiten und vermeide zu häufige Anfragen.")
