@@ -90,7 +90,6 @@ def is_general_provider(domain: str) -> bool:
 def is_portal_domain(domain: str) -> bool:
     """Prüft ob eine Domain ein bekanntes Portal/eine Weiterleitungsseite ist"""
     domain = domain.lower().strip()
-    # WWW-Präfix entfernen für den Vergleich
     domain_clean = domain.replace('www.', '')
     return domain_clean in PORTAL_REDIRECT_DOMAINS or domain in PORTAL_REDIRECT_DOMAINS
 
@@ -154,7 +153,7 @@ def search_ddgs_library(query: str, restrict_to_ch: bool = True) -> Optional[str
                         'buch.ch', 'jameda.de', 'docdirekt.ch', 'gmx.ch', 'bluewin.ch',
                         'gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com',
                         'praxisfinder.ch', 'therapeuten.ch', 'medizinportal.ch',
-                        'wanadoo.fr', 'orange.fr', 'gmail.com', 'google.com']
+                        'wanadoo.fr', 'orange.fr', 'google.com']
 
     try:
         with DDGS() as ddgs:
@@ -261,7 +260,7 @@ def extract_site_information(url: str, info_types: List[str]) -> Dict[str, Optio
         if 'Name' in info_types:
             title_tag = soup.find('title')
             h1_tag = soup.find('h1')
-            result['Name'] = title_tag.get_text().strip() if title_tag else (h1_tag.get_text().strip() if h1_tag else 'Nicht gefunden')
+            result['Name_Website'] = title_tag.get_text().strip() if title_tag else (h1_tag.get_text().strip() if h1_tag else 'Nicht gefunden')
 
         if 'Mailadresse' in info_types:
             emails = extract_emails(response.text)
@@ -281,7 +280,9 @@ def extract_site_information(url: str, info_types: List[str]) -> Dict[str, Optio
 
         if 'Dienstleistungen' in info_types:
             services = extract_services(soup)
-            result['Dienstleistungen'] = '; '.join(services[:8]) if services else 'Keine gefunden'
+            result['Dienstleistungen'] = '; '.join(services) if services else 'Keine gefunden'
+            # Anzahl als eigene Spalte für schnelle Übersicht
+            result['Anzahl_Dienstleistungen'] = str(len(services)) if services else '0'
 
     except requests.exceptions.RequestException as e:
         result['Error'] = f"HTTP Error: {str(e)}"
@@ -327,38 +328,86 @@ def extract_about_section(soup: BeautifulSoup) -> str:
     return ''
 
 def extract_services(soup: BeautifulSoup) -> List[str]:
-    """Sucht nach Dienstleistungs-Listen"""
+    """
+    Sucht nach Dienstleistungen/Angeboten auf einer Praxishomepage.
+    Speziell optimiert für TCM-/Therapie-Praxen in der Schweiz.
+    """
     services = []
 
-    service_patterns = [
-        'service', 'angebot', 'dienstleistung', 'leistungen', 'behandlung',
-        'therapie', 'therapien', 'methoden', 'anwendung'
+    # Bereinigungshilfe: Text normalisieren
+    def clean(text: str) -> str:
+        text = re.sub(r'\s+', ' ', text).strip()
+        # Buttons/Links-Artefakte entfernen
+        if len(text) < 4:
+            return ''
+        # Zeilen, die nur aus Navigation/Cookies/etc. bestehen, verwerfen
+        junk = ['cookie', 'datenschutz', 'impressum', 'login', 'anmelden', 'mehr erfahren',
+                'weiterlesen', 'menu', 'navigation', 'home', 'kontakt aufnehmen']
+        if text.lower() in junk:
+            return ''
+        return text
+
+    # 1) Explizite Listen zu den Themen Leistungen/Angebot/Behandlung/Therapie
+    list_patterns = [
+        r'(dienstleistung|leistung|angebot|service|behandlung|therapi|methode|'
+        r'anwendung|schwerpunkt|indikation|spezial|kurse|kursangebot|'
+        r'massag|qi gong|akupunktur|tuina|shiatsu|kräuterkunde|phytotherap|'
+        r'moxibustion|schröpfglas|ernährungsberatung|heilkräuter)'
     ]
 
-    for pattern in service_patterns:
-        lists = soup.find_all(['ul', 'ol'], class_=re.compile(pattern, re.I))
-        for lst in lists:
-            for li in lst.find_all('li')[:10]:
-                service_text = li.get_text(strip=True)
-                if 10 < len(service_text) < 100:
-                    services.append(service_text)
+    for lst in soup.find_all(['ul', 'ol']):
+        # context prüfen: Überschrift vor der Liste oder Klassen-/ID-Namen
+        context = ''
+        prev_heading = lst.find_previous(['h1', 'h2', 'h3', 'h4', 'strong', 'b'])
+        if prev_heading:
+            context = prev_heading.get_text().lower()
+        classes_and_id = ' '.join(lst.get('class', []) + [lst.get('id', '') or '']).lower()
+        parent_classes = ''
+        parent = lst.parent
+        if parent is not None:
+            parent_classes = ' '.join(parent.get('class', []) + [parent.get('id', '') or '']).lower()
 
-    for container in soup.find_all(['section', 'div'], class_=re.compile(r'(leistungen|behandlung|angebote|services)', re.I)):
-        for li in container.find_all('li')[:10]:
-            service_text = li.get_text(strip=True)
-            if 10 < len(service_text) < 100 and service_text not in services:
-                services.append(service_text)
+        haystack = f"{context} {classes_and_id} {parent_classes}"
 
+        if re.search(list_patterns, haystack):
+            for li in lst.find_all('li'):
+                item = clean(li.get_text(strip=True))
+                if item and 4 < len(item) < 120 and item.lower() not in [s.lower() for s in services]:
+                    services.append(item)
+
+    # 2) Container mit passenden Klassen
+    for container in soup.find_all(['section', 'div'],
+                                   class_=re.compile(r'(leistung|behandlung|angebot|service|therapie|methode|schwerpunkt|indikation)', re.I)):
+        # Listen im Container
+        for li in container.find_all('li'):
+            item = clean(li.get_text(strip=True))
+            if item and 4 < len(item) < 120 and item.lower() not in [s.lower() for s in services]:
+                services.append(item)
+        # Kurze H3/H4-Überschriften im Container = einzelne Leistungen (z.B. Karten-Layouts)
+        for heading in container.find_all(['h2', 'h3', 'h4']):
+            item = clean(heading.get_text(strip=True))
+            if item and 4 < len(item) < 80 and item.lower() not in [s.lower() for s in services]:
+                services.append(item)
+
+    # 3) Überschriften-Blöcke: "Unsere Behandlungen" → nachfolgende Liste/Karten
     for heading in soup.find_all(['h2', 'h3']):
-        if any(keyword in heading.get_text().lower() for keyword in ['behandlung', 'leistung', 'angebot', 'therapie', 'methoden']):
+        if re.search(list_patterns, heading.get_text().lower()):
             sibling = heading.find_next(['ul', 'ol'])
             if sibling:
-                for li in sibling.find_all('li')[:10]:
-                    service_text = li.get_text(strip=True)
-                    if 10 < len(service_text) < 100 and service_text not in services:
-                        services.append(service_text)
+                for li in sibling.find_all('li'):
+                    item = clean(li.get_text(strip=True))
+                    if item and 4 < len(item) < 120 and item.lower() not in [s.lower() for s in services]:
+                        services.append(item)
 
-    return services[:15]
+    # Deduplizieren (case-insensitive) und auf 25 begrenzen
+    unique = []
+    seen = set()
+    for s in services:
+        key = s.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(s)
+    return unique[:25]
 
 # =============================================================================
 # HAUPTANWENDUNG
@@ -378,7 +427,7 @@ Diese Web-Anwendung:
 3. Sucht **automatisch** nach Homepages:
    - Zuerst: E-Mail-Adresse → Domain extrahieren (nur bei echten Praxis-Domains!)
    - Dann: Web-Suche mit Namen + Ort + Filter 1 (nur .ch Domains)
-4. Extrahiert Praxis-Namen, Mailadressen, Telefon, Dienstleistungen und weitere Details
+4. Extrahiert Dienstleistungen/Angebote, Mailadressen, Telefon und weitere Details
 5. Exportiert alle gesammelten Informationen als CSV
 """)
 
@@ -465,6 +514,7 @@ if st.button("PDF laden"):
                     possible_email_cols = []
                     possible_url_cols = []
                     possible_name_cols = []
+                    possible_vorname_cols = []
                     possible_location_cols = []
 
                     for col in df.columns:
@@ -473,7 +523,9 @@ if st.button("PDF laden"):
                             possible_email_cols.append(col)
                         if any(kw in col_lower for kw in ['homepage', 'website', 'url', 'webseite', 'domain']):
                             possible_url_cols.append(col)
-                        if any(kw in col_lower for kw in ['name', 'praxis', 'arzt', 'mediziner', 'therapeut']):
+                        if 'vorname' in col_lower or 'vor name' in col_lower:
+                            possible_vorname_cols.append(col)
+                        elif any(kw in col_lower for kw in ['name', 'praxis', 'arzt', 'mediziner', 'therapeut']):
                             possible_name_cols.append(col)
                         if any(kw in col_lower for kw in ['ort', 'stadt', 'standort', 'kanton', 'gemein', 'ort, kanton', 'ort/kanton', 'ort kanton']):
                             possible_location_cols.append(col)
@@ -491,15 +543,35 @@ if st.button("PDF laden"):
                     df = pd.DataFrame(selected_table_data[1:], columns=selected_table_data[0])
                     df = df.reset_index(drop=True)
 
+                    possible_email_cols = []
+                    possible_url_cols = []
+                    possible_name_cols = []
+                    possible_vorname_cols = []
+                    possible_location_cols = []
+
+                    for col in df.columns:
+                        col_lower = col.lower()
+                        if any(kw in col_lower for kw in ['email', 'mail', 'e-mail', 'e mail']):
+                            possible_email_cols.append(col)
+                        if any(kw in col_lower for kw in ['homepage', 'website', 'url', 'webseite', 'domain']):
+                            possible_url_cols.append(col)
+                        if 'vorname' in col_lower or 'vor name' in col_lower:
+                            possible_vorname_cols.append(col)
+                        elif any(kw in col_lower for kw in ['name', 'praxis', 'arzt', 'mediziner', 'therapeut']):
+                            possible_name_cols.append(col)
+                        if any(kw in col_lower for kw in ['ort', 'stadt', 'standort', 'kanton', 'gemein']):
+                            possible_location_cols.append(col)
+
                 st.dataframe(df.head(15), use_container_width=True)
                 st.caption(f"Gesamte Zeilen: {len(df)} | Spalten: {len(df.columns)}")
 
                 st.session_state['pdf_df'] = df
                 st.session_state['df_columns'] = list(df.columns)
-                st.session_state['possible_email_cols'] = possible_email_cols if 'possible_email_cols' in locals() else []
-                st.session_state['possible_url_cols'] = possible_url_cols if 'possible_url_cols' in locals() else []
-                st.session_state['possible_name_cols'] = possible_name_cols if 'possible_name_cols' in locals() else []
-                st.session_state['possible_location_cols'] = possible_location_cols if 'possible_location_cols' in locals() else []
+                st.session_state['possible_email_cols'] = possible_email_cols
+                st.session_state['possible_url_cols'] = possible_url_cols
+                st.session_state['possible_name_cols'] = possible_name_cols
+                st.session_state['possible_vorname_cols'] = possible_vorname_cols
+                st.session_state['possible_location_cols'] = possible_location_cols
                 st.session_state['pdf_loaded'] = True
                 st.session_state['sorted'] = False
                 st.session_state['scraped_results'] = None
@@ -864,14 +936,20 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     if st.session_state.get('websuche_completed'):
         st.info("💾 Die Tabelle enthält jetzt die Spalte 'Gefundene_Homepage'. Weiter mit Schritt 3!")
 
-# --- SCHRITT 3: HOMEPAGE EXTRACTION ---
+# --- SCHRITT 3: DIENSTLEISTUNGEN UND INFORMATIONEN EXTRAHIEREN ---
 if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
-    st.header("Schritt 3: Informationen von Homepages extrahieren")
+    st.header("Schritt 3: Dienstleistungen & Informationen von Homepages extrahieren 🏥")
 
     work_df = st.session_state['filtered_df']
     available_columns = list(work_df.columns)
 
-    col1, col2 = st.columns(2)
+    st.markdown("""
+    Die App besucht jede Homepage und extrahiert **Dienstleistungen/Angebote**
+    (z. B. Akupunktur, Tuina, Kräutertherapie) sowie optional weitere Kontaktdaten.
+    Das Ergebnis erscheint in einer Tabelle mit **Name, Vorname** und den gefundenen Informationen.
+    """)
+
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         homepage_col = st.selectbox(
@@ -881,17 +959,49 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
         )
 
     with col2:
-        info_columns = st.multiselect(
-            "Welche Informationen sollen extrahiert werden?",
-            ["Name", "Mailadresse", "Telefon", "Adresse", "Über uns", "Dienstleistungen"],
-            default=["Name", "Mailadresse", "Dienstleistungen"],
-            key="info_cols_extract"
+        name_extract_options = st.session_state.get('possible_name_cols', available_columns)
+        name_extract_col = st.selectbox(
+            "Name-Spalte (für Ergebnistabelle):",
+            name_extract_options,
+            index=0 if name_extract_options else 0,
+            key="name_extract_col"
         )
+
+    with col3:
+        vorname_options = ["— Keine —"] + st.session_state.get('possible_vorname_cols', [])
+        vorname_default_index = 1 if len(st.session_state.get('possible_vorname_cols', [])) == 1 else 0
+        vorname_col = st.selectbox(
+            "Vorname-Spalte:",
+            vorname_options,
+            index=vorname_default_index,
+            key="vorname_col_extract"
+        )
+
+    st.subheader("Welche Informationen sollen extrahiert werden?")
+    info_columns = st.multiselect(
+        "Zusätzlich zu den Dienstleistungen:",
+        ["Mailadresse", "Telefon", "Adresse", "Über uns", "Name_Website"],
+        default=["Mailadresse", "Dienstleistungen"][:2],
+        key="info_cols_extract"
+    )
+
+    # Tipp: Dienstleistungen sind immer aktiv – hier transparent machen
+    st.caption("✅ Dienstleistungen werden immer extrahiert.")
+
+    st.subheader("Ausgabeformat der Ergebnistabelle")
+    output_format = st.radio(
+        "Wie sollen die Dienstleistungen dargestellt werden?",
+        [
+            "Eine Zeile pro Praxis (Dienstleistungen mit ; getrennt)",
+            "Eine Zeile pro Dienstleistung (langes Format – ideal zum Pivotieren/Filtern)"
+        ],
+        key="output_format_services"
+    )
 
     st.info("""
     **Hinweis:**
     - Die Website muss öffentlich zugänglich sein
-    - Manche Seiten benötigen JavaScript (dann funktioniert dies eventuell nicht vollständig)
+    - Manche Seiten benötigen JavaScript (dann wird die Extraktion eventuell unvollständig)
     - Die App wartet 1 Sekunde zwischen Anfragen
     - **Tipp:** Bei vielen Zeilen mehrere kleine Durchläufe machen (10–20 Zeilen)
     """)
@@ -904,7 +1014,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
         min(num_rows, 10)
     )
 
-    if st.button("Informationen extrahieren 🚀"):
+    if st.button("Dienstleistungen extrahieren 🚀"):
         results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -913,7 +1023,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
 
         for _, row in work_df.head(max_rows).iterrows():
             processed += 1
-            status_text.text(f"Verarbeite Zeile {processed}/{max_rows}")
+            status_text.text(f"Verarbeite Zeile {processed}/{max_rows}: {str(row[name_extract_col])[:40]}")
 
             homepage_value = str(row[homepage_col]).strip()
 
@@ -926,24 +1036,25 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
             if homepage_value and not homepage_value.lower().startswith(('http://', 'https://')):
                 homepage_value = f"https://{homepage_value}"
 
+            base = {
+                'Name': row[name_extract_col],
+                'Vorname': row[vorname_col] if vorname_col != "— Keine —" else "",
+            }
+
             try:
                 if homepage_value:
-                    extracted_info = extract_site_information(homepage_value, info_columns)
-                    results.append({
-                        'Zeile': processed,
-                        **{col: row[col] for col in work_df.columns},
-                        **extracted_info
-                    })
+                    extracted_info = extract_site_information(homepage_value, info_columns + ['Dienstleistungen'])
+                    results.append({**base, **{col: row[col] for col in [homepage_col]}, **extracted_info})
                 else:
                     results.append({
-                        'Zeile': processed,
-                        **{col: row[col] for col in work_df.columns},
+                        **base,
+                        homepage_col: row[homepage_col],
                         'Error': 'Keine gültige Homepage-URL vorhanden'
                     })
             except Exception as e:
                 results.append({
-                    'Zeile': processed,
-                    **{col: row[col] for col in work_df.columns},
+                    **base,
+                    homepage_col: row[homepage_col],
                     'Error': str(e)
                 })
 
@@ -951,22 +1062,66 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
             time.sleep(1)
 
         status_text.text("Fertig! ✅")
-        st.session_state['scraped_results'] = results
 
-        result_out_df = pd.DataFrame(results)
-        st.success(f"✅ {len(results)} Zeilen bearbeitet")
+        results_df = pd.DataFrame(results)
+        st.session_state['scraped_results_df'] = results_df
+        st.session_state['scraped_output_format'] = output_format
 
-        st.subheader("Ergebnisse")
-        st.dataframe(result_out_df, use_container_width=True)
+        st.success(f"✅ {len(results_df)} Praxen bearbeitet")
 
-        csv = result_out_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Ergebnisse als CSV herunterladen",
-            data=csv,
-            file_name='scraped_ergebnisse.csv',
-            mime='text/csv',
-            key="download_results"
-        )
+    # Ergebnisanzeige (bleibt auch nach Streamlit-Reruns erhalten)
+    if st.session_state.get('scraped_results_df') is not None:
+        results_df = st.session_state['scraped_results_df']
+        out_format = st.session_state.get('scraped_output_format',
+                                          "Eine Zeile pro Praxis (Dienstleistungen mit ; getrennt)")
+
+        st.subheader("📊 Ergebnistabelle")
+
+        if out_format.startswith("Eine Zeile pro Praxis"):
+            st.dataframe(results_df, use_container_width=True)
+
+            csv_export = results_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Ergebnisse herunterladen (eine Zeile pro Praxis)",
+                data=csv_export,
+                file_name='praxen_dienstleistungen.csv',
+                mime='text/csv',
+                key="download_results_wide"
+            )
+        else:
+            # Langes Format: eine Zeile pro einzelner Dienstleistung
+            long_rows = []
+            for _, r in results_df.iterrows():
+                services_raw = str(r.get('Dienstleistungen', 'Keine gefunden'))
+                if services_raw in ('Keine gefunden', 'nan', 'None', ''):
+                    long_rows.append({**r.to_dict(), 'Dienstleistung': 'Keine gefunden'})
+                else:
+                    for svc in services_raw.split(';'):
+                        svc = svc.strip()
+                        if svc:
+                            long_rows.append({**r.to_dict(), 'Dienstleistung': svc})
+
+            long_df = pd.DataFrame(long_rows)
+            # Original-Spalte 'Dienstleistungen' im Langformat entfernen
+            drop_cols = [c for c in ['Dienstleistungen', 'Anzahl_Dienstleistungen'] if c in long_df.columns]
+            long_df = long_df.drop(columns=drop_cols)
+
+            st.dataframe(long_df, use_container_width=True)
+            st.caption(f"➡️ {len(long_df)} Zeilen (eine pro Dienstleistung)")
+
+            csv_export = long_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Ergebnisse herunterladen (eine Zeile pro Dienstleistung)",
+                data=csv_export,
+                file_name='praxen_dienstleistungen_lang.csv',
+                mime='text/csv',
+                key="download_results_long"
+            )
+
+        # Schnelle Statistik
+        if 'Dienstleistungen' in results_df.columns:
+            found = (results_df['Dienstleistungen'] != 'Keine gefunden').sum()
+            st.caption(f"📈 Bei {found} von {len(results_df)} Praxen wurden Dienstleistungen gefunden.")
 
 st.markdown("---")
 st.caption("""
