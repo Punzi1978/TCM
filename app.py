@@ -981,7 +981,7 @@ if st.session_state.get('sorted', False) and 'filtered_df' in st.session_state:
     info_columns = st.multiselect(
         "Zusätzlich zu den Dienstleistungen:",
         ["Mailadresse", "Telefon", "Adresse", "Über uns", "Name_Website"],
-        default=["Mailadresse", "Dienstleistungen"][:2],
+        default=["Mailadresse"],
         key="info_cols_extract"
     )
 
